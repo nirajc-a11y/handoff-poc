@@ -449,7 +449,7 @@ async def _handle_ai_handoff(
 
     xml = f"""<Response>
     {s_greet}
-    <Record action="{ai_turn_url}" method="POST" maxLength="15" timeout="3" finishOnKey="#" redirect="true" />
+    <Record action="{ai_turn_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
     {_speak("I didn't hear anything. Let me connect you to an agent.", language=lang)}
     <Redirect method="POST">{escalate_url}</Redirect>
 </Response>"""
@@ -621,7 +621,7 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
         )
         return xml_response(f"""<Response>
     {_speak("I am listening. Please go ahead and speak after the beep.", language=language)}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="3" finishOnKey="#" redirect="true" />
+    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
     {_speak("I didn't hear anything. Let me connect you to an agent.", language=language)}
     <Redirect method="POST">{escalate_url}</Redirect>
 </Response>""")
@@ -632,7 +632,7 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
     recording_filename = None
     try:
         import httpx as httpx_client
-        async with httpx_client.AsyncClient(timeout=30.0) as http:
+        async with httpx_client.AsyncClient(timeout=15.0) as http:
             audio_resp = await http.get(record_url)
             audio_resp.raise_for_status()
             audio_data = audio_resp.content
@@ -660,10 +660,10 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
     except Exception:
         logger.exception("Failed to save recording")
 
-    # Step 2: Transcribe with Groq Whisper
+    # Step 2: Transcribe with Groq Whisper (pass pre-downloaded audio to avoid second download)
     speech_text = ""
     try:
-        speech_text = await ai_engine.transcribe_audio(record_url)
+        speech_text = await ai_engine.transcribe_audio(record_url, audio_data=audio_data)
     except Exception:
         logger.exception("Transcription failed")
 
@@ -681,7 +681,7 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
         )
         return xml_response(f"""<Response>
     {_speak("I could not understand that. Could you please repeat?", language=language)}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="3" finishOnKey="#" redirect="true" />
+    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
 </Response>""")
 
     logger.info("AI turn %d: customer said: %s", turn, speech_text)
@@ -778,7 +778,7 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
     s_response = _speak(ai_response.text, language=language)
     return xml_response(f"""<Response>
     {s_response}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="3" finishOnKey="#" redirect="true" />
+    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
     {_speak("I didn't hear a response. Let me connect you to an agent.", language=language)}
     <Redirect method="POST">{escalate_url}</Redirect>
 </Response>""")

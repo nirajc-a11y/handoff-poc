@@ -124,23 +124,27 @@ class AIEngine:
     # Audio transcription
     # ------------------------------------------------------------------
 
-    async def transcribe_audio(self, audio_url: str) -> str:
-        """Download audio from URL and transcribe via Groq Whisper."""
+    async def transcribe_audio(self, audio_url: str, audio_data: bytes | None = None) -> str:
+        """Transcribe audio via Groq Whisper.
+
+        Args:
+            audio_url: URL to download audio from (used only if audio_data is None)
+            audio_data: Pre-downloaded audio bytes (avoids a second HTTP download)
+        """
         if not self.groq_api_key or not _GROQ_AVAILABLE:
             logger.warning("Groq not available for transcription")
             return ""
 
-        import httpx
-
         try:
-            # Download the recording from Plivo
-            async with httpx.AsyncClient(timeout=30.0) as http_client:
-                resp = await http_client.get(audio_url)
-                resp.raise_for_status()
-                audio_data = resp.content
+            # Download only if audio_data not provided
+            if audio_data is None:
+                import httpx
+                async with httpx.AsyncClient(timeout=15.0) as http_client:
+                    resp = await http_client.get(audio_url)
+                    resp.raise_for_status()
+                    audio_data = resp.content
 
             if len(audio_data) < 1000:
-                # Too small — likely silence or error
                 logger.info("Audio too small (%d bytes), skipping transcription", len(audio_data))
                 return ""
 
@@ -148,7 +152,7 @@ class AIEngine:
             groq_client = AsyncGroq(api_key=self.groq_api_key)
             transcription = await groq_client.audio.transcriptions.create(
                 file=("recording.mp3", audio_data),
-                model="whisper-large-v3",
+                model="whisper-large-v3-turbo",
             )
             text = transcription.text.strip()
             logger.info("Transcribed audio (%d bytes): %s", len(audio_data), text[:100])
@@ -267,14 +271,15 @@ class AIEngine:
         client = AsyncGroq(api_key=self.groq_api_key)
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
+        # Keep only last 10 messages to reduce prompt size and latency
+        messages.extend(history[-10:])
         messages.append({"role": "user", "content": message})
 
         completion = await client.chat.completions.create(
             model=self.default_model,
             messages=messages,
             temperature=0.7,
-            max_tokens=300,
+            max_tokens=150,
         )
 
         text = (completion.choices[0].message.content or "").strip()
