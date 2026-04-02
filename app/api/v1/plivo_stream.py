@@ -203,13 +203,17 @@ async def plivo_audio_stream(
                 if greeting_audio:
                     session.is_speaking = True
                     await send_audio(greeting_audio)
-                    # Wait for Plivo to finish playing greeting before listening
-                    playback_secs = len(greeting_audio) / 8000
-                    send_secs = (len(greeting_audio) // 320 + 1) * 0.018
-                    remaining = playback_secs - send_secs
-                    if remaining > 0:
-                        await asyncio.sleep(remaining)
-                    session.finish_speaking()
+                    # Don't block the loop — schedule finish_speaking in background
+                    # so is_speaking=True rejects echo audio in real-time via add_audio()
+                    _greet_len = len(greeting_audio)
+                    async def _finish_greeting():
+                        playback_secs = _greet_len / 8000
+                        send_secs = (_greet_len // 320 + 1) * 0.018
+                        remaining = playback_secs - send_secs
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                        session.finish_speaking()
+                    asyncio.create_task(_finish_greeting())
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")
