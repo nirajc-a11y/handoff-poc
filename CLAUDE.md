@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Handoff POC is a multi-tenant telecom handoff orchestration engine. It demonstrates real-time IVR / AI / Human agent handoffs across Voice, WhatsApp, Email, and SMS channels with a live operations dashboard.
+Handoff POC is a multi-tenant telecom handoff orchestration engine. It demonstrates real-time IVR / AI / Human agent handoffs across Voice, WhatsApp, Email, and SMS channels with a live operations dashboard and supervisor panel.
 
 Two independent sub-projects:
 - **Backend** (root `app/`) — Python FastAPI with async SQLAlchemy, Alembic migrations
@@ -63,13 +63,41 @@ Pluggable ABC interfaces for 4 channels: `TelephonyProvider`, `WhatsAppProvider`
 Implementations: Twilio, Plivo (voice only), Mock (all channels). Providers are registered at startup in `app/main.py` lifespan based on env var presence.
 
 ### Real-time Voice AI (`app/livekit/voice_agent.py`)
-Pipeline: Plivo audio stream (mulaw 8kHz) -> Sarvam STT -> Groq LLM (Llama 3) -> Sarvam TTS -> mulaw playback. Silence detection triggers turn processing. Bilingual: English + Marathi.
+
+Production-grade bidirectional voice AI pipeline:
+
+```
+Plivo audio stream (mulaw 8kHz)
+  -> VoiceAISession.add_audio() [silence detection + barge-in monitoring]
+  -> Sarvam STT (streaming via shared httpx pool)
+  -> Groq LLM (streaming sentences via _call_groq_stream)
+  -> Sarvam TTS (streaming per-sentence via synthesize_stream)
+  -> mulaw chunks back to Plivo
+```
+
+**Key features:**
+- **Streaming pipeline**: LLM streams sentences -> each sentence immediately sent to TTS -> mulaw chunks sent to Plivo as they arrive. First audio reaches caller in ~500ms.
+- **Barge-in**: Tri-state machine (`LISTENING`/`SPEAKING`/`BARGE_IN`). During TTS playback, RMS energy is monitored. 3 consecutive high-energy frames trigger barge-in -> `clearAudio` sent to Plivo, TTS/LLM pipeline cancelled.
+- **Echo suppression**: (1) Playback wait — calculates audio duration from bytes sent, waits for Plivo to finish before listening. (2) Post-TTS cooldown (0.6s). (3) Echo guard — discards short phantom transcripts ("Yes", "Yeah") on first utterance after TTS.
+- **Shared httpx pool**: Module-level `httpx.AsyncClient` in `sarvam.py` reuses TCP+TLS connections (~300-600ms saved per turn).
+- **Tuned thresholds**: Silence detection 0.6s (industry standard), cooldown 0.6s, min speech 0.3s.
+
+Latency budget: ~1.5-2.0s turn latency (down from ~4.5s). See `VOICE_AI_FINDINGS.md` for full analysis.
+
+### Supervisor Subsystem
+
+Live call supervision with Listen, Whisper, and Barge modes:
+
+- **Session Registry** (`app/livekit/session_registry.py`): Module-level dict tracking active `VoiceAISession` instances by `conversation_id`. Stores session, Plivo WebSocket, stream_sid, and listener queues. Registered/unregistered in `plivo_stream.py`.
+- **Listen** (`WS /api/v1/supervisor/listen/{conv_id}`): Forwards a copy of caller + AI audio to supervisor browser via WebSocket. Frontend decodes mulaw and plays via Web Audio API.
+- **Whisper** (`POST /api/v1/supervisor/whisper/{conv_id}`): Injects supervisor guidance as a system message into `conversation_history`. AI incorporates it in the next response. Customer never hears it.
+- **Barge** (`POST /api/v1/supervisor/barge/{conv_id}`): Cancels AI pipeline (`_barge_in_event`), sends `clearAudio`, transitions to `QUEUED_FOR_HUMAN`, redirects Plivo call to conference room. Supervisor joins via browser softphone.
 
 ### API Layer
-All routes under `/api/v1/` via `app/api/v1/router.py`. 87+ endpoints. Swagger at `/docs`. Multi-tenancy enforced via `X-Tenant-Id` header (see `app/dependencies.py`).
+All routes under `/api/v1/` via `app/api/v1/router.py`. 91+ endpoints. Swagger at `/docs`. Multi-tenancy enforced via `X-Tenant-Id` header (see `app/dependencies.py`).
 
 ### Frontend
-React 19 + Vite + TailwindCSS v4. Path alias `@/` maps to `./src/`. Pages: live dashboard, agents, campaigns, analytics, IVR config, history, settings. Also has a browser softphone component (Plivo WebRTC). State via Jotai atoms (`src/stores/`), data fetching via TanStack React Query. Vite proxies `/api`, `/ws`, `/recordings` to backend at `:8000`.
+React 19 + Vite + TailwindCSS v4. Path alias `@/` maps to `./src/`. Pages: live dashboard, agents, campaigns, analytics, IVR config, history, settings. Browser softphone (Plivo WebRTC) in right panel. Supervisor panel in conversation detail (Listen/Whisper/Barge controls). State via Jotai atoms (`src/stores/`), data fetching via TanStack React Query. Vite proxies `/api`, `/ws`, `/recordings` to backend at `:8000`.
 
 ### Module-Level Singletons
 Core engines are instantiated as module-level singletons at the bottom of their files: `handoff_engine`, `event_bus`, `routing_engine`, `ai_engine`, `ivr_engine`, `context_builder`, `provider_registry`. These are imported directly (no DI container).
@@ -85,7 +113,7 @@ Core engines are instantiated as module-level singletons at the bottom of their 
 
 ## Environment Variables
 
-Configured via `pydantic-settings` in `app/config.py` (reads `.env`). Key vars: `DATABASE_URL`, `GROQ_API_KEY`, `TWILIO_ACCOUNT_SID`/`AUTH_TOKEN`/`NUMBER`, `PLIVO_AUTH_ID`/`AUTH_TOKEN`/`NUMBER`, `BASE_WEBHOOK_URL` (ngrok for webhooks), `LIVEKIT_URL`/`API_KEY`/`API_SECRET`, `SARVAM_API_KEY`.
+Configured via `pydantic-settings` in `app/config.py` (reads `.env`). Key vars: `DATABASE_URL`, `GROQ_API_KEY`, `GROQ_MODEL`, `PLIVO_AUTH_ID`/`AUTH_TOKEN`/`NUMBER`, `TWILIO_ACCOUNT_SID`/`AUTH_TOKEN`/`NUMBER`, `BASE_WEBHOOK_URL` (ngrok for webhooks), `LIVEKIT_URL`/`API_KEY`/`API_SECRET`, `SARVAM_API_KEY`.
 
 ## Deployment
 

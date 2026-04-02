@@ -4,12 +4,15 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 
 ## Features
 
-- **6 Handoff Scenarios** — IVR→AI, AI→Human, Human→Human transfer, IVR skip, WhatsApp escalation, Email threading
-- **Real Phone Calls** — Twilio (primary) and Plivo integration with pluggable provider architecture
-- **AI Agent** — Groq-powered (Llama 3) conversational AI with confidence-based escalation
+- **6 Handoff Scenarios** — IVR->AI, AI->Human, Human->Human transfer, IVR skip, WhatsApp escalation, Email threading
+- **Real Phone Calls** — Twilio and Plivo integration with pluggable provider architecture
+- **AI Agent** — Groq-powered (Llama 3) conversational AI with streaming LLM + streaming TTS (~1.5s turn latency)
+- **Barge-In** — Caller can interrupt AI mid-sentence; system detects speech, stops TTS, processes new input
+- **Echo Suppression** — Playback wait + echo guard prevents phantom transcript pickup
+- **Supervisor Panel** — Live Listen (hear call audio), Whisper (guide AI without customer hearing), Barge (take over call)
 - **Bilingual IVR** — English + Marathi language selection with language-aware AI responses
 - **Call Recording** — Automatic recording saved to `recordings/` folder
-- **Live Transcription** — Real-time speech-to-text via Twilio transcription
+- **Live Transcription** — Real-time speech-to-text via Sarvam (Indian languages) and Twilio
 - **Browser Softphone** — WebRTC-based agent softphone (Plivo Browser SDK) with mute, hold, transfer
 - **Live Dashboard** — Real-time operations center showing conversations, agents, queue metrics, event feed
 - **Multi-tenant** — All data scoped by `tenant_id` from day one
@@ -204,8 +207,12 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 | `/api/v1/twilio/answer` | POST | Twilio TwiML answer webhook |
 | `/api/v1/twilio/dtmf` | POST | Twilio DTMF handler |
 | `/api/v1/ws/dashboard` | WS | Live dashboard WebSocket |
+| `/api/v1/supervisor/listen/{id}` | WS | Stream live caller+AI audio to supervisor |
+| `/api/v1/supervisor/whisper/{id}` | POST | Inject guidance into AI (customer can't hear) |
+| `/api/v1/supervisor/barge/{id}` | POST | Mute AI, take over call via conference |
+| `/api/v1/supervisor/active-sessions` | GET | List active AI voice sessions |
 
-87+ total endpoints. See full list at `/docs`.
+91+ total endpoints. See full list at `/docs`.
 
 ## Tech Stack
 
@@ -213,14 +220,15 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 |-------|-----------|
 | Framework | FastAPI + Uvicorn |
 | Database | PostgreSQL + async SQLAlchemy + Alembic |
-| AI | Groq SDK (Llama 3.3 70B) with mock fallback |
+| AI | Groq SDK (Llama 3.3 70B) with streaming + mock fallback |
+| STT/TTS | Sarvam AI (Indian languages: English, Marathi, Hindi) |
 | Telephony | Twilio Voice + Plivo (pluggable) |
 | Browser Calling | Plivo Browser SDK (WebRTC) |
 | Real-time | WebSocket (FastAPI native) |
-| Frontend | Tailwind CSS + vanilla JS (single HTML file) |
+| Frontend | React 19 + TailwindCSS v4 + shadcn/ui |
 | IVR | Twilio TwiML / Plivo XML |
-| Recording | Twilio Call Recording → local `.wav` files |
-| Transcription | Twilio Speech-to-Text |
+| Recording | Full-call recording via Plivo/Twilio → local `.mp3` files |
+| Supervision | Live Listen + Whisper + Barge via WebSocket + conference |
 
 ## Project Structure
 
@@ -238,6 +246,8 @@ handoff-poc/
 │   │   ├── ivr.py              #   IVR menu config
 │   │   ├── twilio.py           #   Twilio TwiML webhooks (9 endpoints)
 │   │   ├── plivo.py            #   Plivo XML webhooks (7 endpoints)
+│   │   ├── plivo_stream.py     #   Plivo bidirectional audio stream (AI voice)
+│   │   ├── supervisor.py       #   Supervisor Listen/Whisper/Barge endpoints
 │   │   ├── webhooks.py         #   Generic provider webhooks
 │   │   ├── ws.py               #   WebSocket dashboard endpoint
 │   │   └── channels/           #   WhatsApp, Email, SMS endpoints
@@ -245,7 +255,7 @@ handoff-poc/
 │   │   ├── state_machine.py    #   11 states, 24 triggers, transition table
 │   │   ├── handoff_engine.py   #   Central orchestrator (most important file)
 │   │   ├── events.py           #   Async event bus with glob matching
-│   │   ├── ai_engine.py        #   Groq AI with bilingual support
+│   │   ├── ai_engine.py        #   Groq AI with streaming LLM + bilingual support
 │   │   ├── ivr_engine.py       #   IVR menu traversal
 │   │   ├── routing_engine.py   #   Agent routing (skill-based, least-loaded)
 │   │   └── context_builder.py  #   Handoff context payloads
@@ -260,6 +270,10 @@ handoff-poc/
 │   │   ├── twilio/             #   Twilio Voice implementation
 │   │   ├── plivo/              #   Plivo Voice implementation
 │   │   └── mock/               #   Mock providers for all channels
+│   ├── livekit/
+│   │   ├── voice_agent.py      #   VoiceAISession (barge-in, streaming, echo guard)
+│   │   ├── sarvam.py           #   Sarvam STT/TTS client (shared httpx pool)
+│   │   └── session_registry.py #   Active session tracking for supervisor
 │   ├── services/               #   Business logic layer (7 services)
 │   └── ws/                     #   WebSocket manager + event broadcaster
 ├── scripts/
