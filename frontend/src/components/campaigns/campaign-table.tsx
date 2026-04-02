@@ -1,10 +1,15 @@
-import { useCampaigns } from '@/hooks/use-campaigns'
+import { useState } from 'react'
+import { useCampaigns, useDeleteCampaign } from '@/hooks/use-campaigns'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from '@/components/ui/dialog'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
+import { toast } from 'sonner'
 import type { Campaign } from '@/lib/types'
-import { Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 
 interface Props {
   selectedId: string | null
@@ -33,6 +38,20 @@ function formatDate(d: string | null) {
 
 export function CampaignTable({ selectedId, onSelect, onCreateClick }: Props) {
   const { data: campaigns = [], isLoading } = useCampaigns()
+  const deleteCampaign = useDeleteCampaign()
+  const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null)
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    try {
+      await deleteCampaign.mutateAsync(deleteTarget.id)
+      toast.success(`Campaign "${deleteTarget.name}" deleted`)
+      if (selectedId === deleteTarget.id) onSelect(null as unknown as Campaign)
+      setDeleteTarget(null)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete campaign')
+    }
+  }
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
@@ -58,6 +77,7 @@ export function CampaignTable({ selectedId, onSelect, onCreateClick }: Props) {
               <TableHead>Start Date</TableHead>
               <TableHead>End Date</TableHead>
               <TableHead>Created</TableHead>
+              <TableHead className="w-16"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -81,11 +101,38 @@ export function CampaignTable({ selectedId, onSelect, onCreateClick }: Props) {
                 <TableCell className="text-gray-500">{formatDate(c.start_date)}</TableCell>
                 <TableCell className="text-gray-500">{formatDate(c.end_date)}</TableCell>
                 <TableCell className="text-gray-400">{formatDate(c.created_at)}</TableCell>
+                <TableCell>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-red-500 hover:text-red-700"
+                    onClick={(e) => { e.stopPropagation(); setDeleteTarget(c) }}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
       )}
+
+      <Dialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null) }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete Campaign</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-gray-600">
+            Delete &quot;{deleteTarget?.name}&quot;? This action cannot be undone.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleteCampaign.isPending}>
+              {deleteCampaign.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

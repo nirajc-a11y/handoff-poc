@@ -4,15 +4,31 @@ import { CampaignForm } from '@/components/campaigns/campaign-form'
 import { LeadTable } from '@/components/campaigns/lead-table'
 import { LeadUpload } from '@/components/campaigns/lead-upload'
 import { AssignDialog } from '@/components/campaigns/assign-dialog'
+import { useNextCampaignLead } from '@/hooks/use-campaigns'
+import { useAtomValue } from 'jotai'
+import { userIdAtom } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
+import { toast } from 'sonner'
 import type { Campaign } from '@/lib/types'
-import { Upload, Users } from 'lucide-react'
+import { Upload, Users, SkipForward } from 'lucide-react'
 
 export function CampaignsPage() {
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [showLeadUpload, setShowLeadUpload] = useState(false)
   const [showAssign, setShowAssign] = useState(false)
+  const nextLead = useNextCampaignLead()
+  const userId = useAtomValue(userIdAtom)
+
+  const handleNextLead = async () => {
+    if (!selectedCampaign || !userId) return
+    try {
+      await nextLead.mutateAsync({ campaignId: selectedCampaign.id, agentId: userId })
+      toast.success('Next lead retrieved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'No more leads available')
+    }
+  }
 
   return (
     <div className="flex h-[calc(100vh-64px)] flex-col gap-4 overflow-y-auto bg-white p-6">
@@ -38,6 +54,15 @@ export function CampaignsPage() {
             >
               <Users size={14} />
               Assign Leads
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleNextLead}
+              disabled={nextLead.isPending}
+            >
+              <SkipForward size={14} />
+              {nextLead.isPending ? 'Loading…' : 'Next Lead'}
             </Button>
           </div>
         )}

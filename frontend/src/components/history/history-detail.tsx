@@ -1,4 +1,4 @@
-import { useConversation } from '@/hooks/use-conversations'
+import { useConversation, useConversationHandoffs } from '@/hooks/use-conversations'
 import { useMessages } from '@/hooks/use-messages'
 import { MessageThread } from '@/components/live/message-thread'
 import { RecordingPlayer } from './recording-player'
@@ -13,6 +13,7 @@ interface HistoryDetailProps {
 export function HistoryDetail({ conversationId }: HistoryDetailProps) {
   const { data: conv, isLoading: convLoading } = useConversation(conversationId)
   const { data: messages = [] } = useMessages(conversationId)
+  const { data: apiHandoffs = [] } = useConversationHandoffs(conversationId)
 
   if (convLoading) {
     return (
@@ -30,10 +31,11 @@ export function HistoryDetail({ conversationId }: HistoryDetailProps) {
     )
   }
 
-  const handoffEvents: HandoffEvent[] =
+  const contextHandoffs: HandoffEvent[] =
     Array.isArray((conv.context as Record<string, unknown>)?.handoff_events)
       ? ((conv.context as Record<string, unknown>).handoff_events as HandoffEvent[])
       : []
+  const handoffEvents = apiHandoffs.length > 0 ? apiHandoffs : contextHandoffs
 
   return (
     <div className="flex flex-col gap-4 p-4 overflow-y-auto">

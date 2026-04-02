@@ -1,15 +1,17 @@
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import type { IVRMenu } from '@/lib/types'
-import { ListTree } from 'lucide-react'
+import { ListTree, Pencil } from 'lucide-react'
 
 interface IVRNodeProps {
   menu: IVRMenu
   selected: boolean
   onClick: () => void
+  onEdit?: (menu: IVRMenu) => void
 }
 
-export function IVRNode({ menu, selected, onClick }: IVRNodeProps) {
+export function IVRNode({ menu, selected, onClick, onEdit }: IVRNodeProps) {
   const preview = menu.welcome_message
     ? menu.welcome_message.length > 60
       ? menu.welcome_message.slice(0, 60) + '…'
@@ -34,13 +36,23 @@ export function IVRNode({ menu, selected, onClick }: IVRNodeProps) {
             <p className="text-xs text-muted-foreground mt-0.5 truncate">{preview}</p>
           </div>
         </div>
-        <div className="flex flex-col items-end gap-1 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           {menu.is_root && (
             <Badge variant="default" className="text-[10px] h-4">Root</Badge>
           )}
           <span className="text-[10px] text-muted-foreground">
             {(menu.options ?? []).length} option{(menu.options ?? []).length !== 1 ? 's' : ''}
           </span>
+          {onEdit && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="size-6"
+              onClick={(e) => { e.stopPropagation(); onEdit(menu) }}
+            >
+              <Pencil className="size-3" />
+            </Button>
+          )}
         </div>
       </div>
     </button>

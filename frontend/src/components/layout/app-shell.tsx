@@ -9,6 +9,7 @@ import { LivePage } from '@/pages/live'
 import { AnalyticsPage } from '@/pages/analytics'
 import { CampaignsPage } from '@/pages/campaigns'
 import { AgentsPage } from '@/pages/agents'
+import { LeadsPage } from '@/pages/leads'
 import { HistoryPage } from '@/pages/history'
 import { IVRPage } from '@/pages/ivr'
 import { SettingsPage } from '@/pages/settings'
@@ -37,6 +38,8 @@ export function AppShell() {
         return <AnalyticsPage />
       case 'campaigns':
         return <CampaignsPage />
+      case 'leads':
+        return <LeadsPage />
       case 'agents':
         return <AgentsPage />
       case 'history':

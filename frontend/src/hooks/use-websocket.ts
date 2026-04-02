@@ -1,9 +1,10 @@
 import { useEffect } from 'react'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { useQueryClient } from '@tanstack/react-query'
 import { wsManager } from '@/lib/ws'
 import { wsConnectedAtom, wsEventsAtom } from '@/stores/ws'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
+import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
 
 export function useWebSocket() {
@@ -11,7 +12,14 @@ export function useWebSocket() {
   const isConnected = useAtomValue(isConnectedAtom)
   const [, setConnected] = useAtom(wsConnectedAtom)
   const [, setEvents] = useAtom(wsEventsAtom)
+  const setSelectedConvId = useSetAtom(selectedConvIdAtom)
   const qc = useQueryClient()
+
+  // Clear selected conversation and stale queries when tenant changes
+  useEffect(() => {
+    setSelectedConvId(null)
+    setEvents([])
+  }, [tenantId, setSelectedConvId, setEvents])
 
   useEffect(() => {
     if (!tenantId || !isConnected) return
@@ -21,14 +29,18 @@ export function useWebSocket() {
       if (event.type.startsWith('conversation.')) {
         qc.invalidateQueries({ queryKey: ['conversations'] })
         if (event.data?.conversation_id) {
-          qc.invalidateQueries({ queryKey: ['conversations', event.data.conversation_id] })
+          qc.invalidateQueries({ queryKey: ['conversations', 'detail', event.data.conversation_id] })
+          qc.invalidateQueries({ queryKey: ['conversations', 'handoffs', event.data.conversation_id] })
           qc.invalidateQueries({ queryKey: ['messages', event.data.conversation_id] })
         }
       }
       if (event.type.startsWith('agent.')) qc.invalidateQueries({ queryKey: ['agents'] })
-      if (event.type.startsWith('queue.')) qc.invalidateQueries({ queryKey: ['queue-stats'] })
+      if (event.type.startsWith('queue.')) {
+        qc.invalidateQueries({ queryKey: ['queue-stats'] })
+        qc.invalidateQueries({ queryKey: ['handoff-queue'] })
+      }
       if (event.type.startsWith('campaign.')) qc.invalidateQueries({ queryKey: ['campaigns'] })
     })
     return () => { unsub(); wsManager.disconnect() }
-  }, [tenantId, setConnected, setEvents, qc])
+  }, [tenantId, isConnected, setConnected, setEvents, qc])
 }

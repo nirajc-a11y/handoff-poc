@@ -7,7 +7,7 @@ import type { Agent } from '@/lib/types'
 export function useAgents() {
   const tenantId = useAtomValue(tenantIdAtom)
   return useQuery<Agent[]>({
-    queryKey: ['agents'],
+    queryKey: ['agents', tenantId],
     queryFn: () => api.get('/agents'),
     refetchInterval: 10_000,
     enabled: !!tenantId,
@@ -17,10 +17,14 @@ export function useAgents() {
 export function useAvailableAgents() {
   const tenantId = useAtomValue(tenantIdAtom)
   return useQuery<Agent[]>({
-    queryKey: ['agents', 'available'],
+    queryKey: ['agents', tenantId, 'available'],
     queryFn: () => api.get('/agents/available'),
     enabled: !!tenantId,
   })
+}
+
+export function useAgent(id: string | null) {
+  return useQuery<Agent>({ queryKey: ['agents', 'detail', id], queryFn: () => api.get(`/agents/${id}`), enabled: !!id })
 }
 
 export function useUpdateAgentStatus() {

@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebFetch(domain:docs.sarvam.ai)"
+      "WebFetch(domain:docs.sarvam.ai)",
+      "Bash(xargs grep:*)",
+      "Bash(git log:*)",
+      "Bash(find /c/Users/Jayant/angel-products/angel-tel/handoff-poc -type f -name \"*.py\" -exec grep -l \"process_turn\\\\|finish_speaking\\\\|is_speaking\" {} \\\\;)",
+      "Bash(find /c/Users/Jayant/angel-products/angel-tel/handoff-poc/app -name \"*.py\" -exec grep -l \"Stream\\\\|media_stream\\\\|AudioSocket\" {} \\\\;)",
+      "Bash(find /c/Users/Jayant/angel-products/angel-tel/handoff-poc -type f -name \"*.py\" -exec grep -l \"sentence\\\\|split.*text\" {} \\\\;)",
+      "Bash(pip show:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app/api/v1/plivo_stream.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

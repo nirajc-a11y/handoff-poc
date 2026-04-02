@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { AgentGrid } from './agent-grid'
 import { OutboundDialer } from './outbound-dialer'
 import { CampaignWidget } from './campaign-widget'
+import { QueueList } from './queue-list'
 import { EventFeed } from './event-feed'
 
 export function RightPanel() {
@@ -15,6 +16,15 @@ export function RightPanel() {
           </CardHeader>
           <CardContent>
             <AgentGrid />
+          </CardContent>
+        </Card>
+
+        <Card size="sm">
+          <CardHeader className="pb-0">
+            <CardTitle className="text-xs font-semibold text-gray-600">Queue</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <QueueList />
           </CardContent>
         </Card>
 

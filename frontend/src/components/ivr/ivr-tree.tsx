@@ -1,10 +1,18 @@
 import { useState } from 'react'
-import { useIVRMenus } from '@/hooks/use-ivr'
+import { useIVRMenus, useUpdateIVRMenu } from '@/hooks/use-ivr'
 import { IVRNode } from './ivr-node'
 import { IVROptionForm } from './ivr-option-form'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Switch } from '@/components/ui/switch'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
-import type { IVRMenuOption } from '@/lib/types'
+import { toast } from 'sonner'
+import type { IVRMenu, IVRMenuOption } from '@/lib/types'
 import { Plus } from 'lucide-react'
 
 const actionTypeStyles: Record<string, string> = {
@@ -19,6 +27,7 @@ export function IVRTree() {
   const { data: menus = [], isLoading } = useIVRMenus()
   const [selectedMenuId, setSelectedMenuId] = useState<string | null>(null)
   const [showOptionForm, setShowOptionForm] = useState(false)
+  const [editMenu, setEditMenu] = useState<IVRMenu | null>(null)
 
   const rootMenus = menus.filter((m) => m.is_root)
   const subMenus = menus.filter((m) => !m.is_root)
@@ -52,6 +61,7 @@ export function IVRTree() {
             onClick={() =>
               setSelectedMenuId(selectedMenuId === menu.id ? null : menu.id)
             }
+            onEdit={setEditMenu}
           />
 
           {/* Options panel */}
@@ -95,7 +105,77 @@ export function IVRTree() {
           onClose={() => setShowOptionForm(false)}
         />
       )}
+
+      {editMenu && (
+        <EditMenuDialog
+          menu={editMenu}
+          open={!!editMenu}
+          onClose={() => setEditMenu(null)}
+        />
+      )}
     </div>
+  )
+}
+
+function EditMenuDialog({ menu, open, onClose }: { menu: IVRMenu; open: boolean; onClose: () => void }) {
+  const updateMenu = useUpdateIVRMenu()
+  const [name, setName] = useState(menu.name)
+  const [welcomeMessage, setWelcomeMessage] = useState(menu.welcome_message ?? '')
+  const [isRoot, setIsRoot] = useState(menu.is_root)
+
+  const handleSave = async () => {
+    if (!name.trim()) {
+      toast.error('Menu name is required')
+      return
+    }
+    try {
+      await updateMenu.mutateAsync({
+        id: menu.id,
+        name: name.trim(),
+        welcome_message: welcomeMessage.trim() || undefined,
+        is_root: isRoot,
+      })
+      toast.success('Menu updated')
+      onClose()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update menu')
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit IVR Menu</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-menu-name">Menu Name</Label>
+            <Input id="edit-menu-name" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-welcome-msg">Welcome Message</Label>
+            <Textarea
+              id="edit-welcome-msg"
+              rows={3}
+              value={welcomeMessage}
+              onChange={(e) => setWelcomeMessage(e.target.value)}
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <Switch checked={isRoot} onCheckedChange={setIsRoot} id="edit-is-root" />
+            <Label htmlFor="edit-is-root" className="cursor-pointer">
+              Root menu (played first when customer calls)
+            </Label>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button onClick={handleSave} disabled={updateMenu.isPending}>
+            {updateMenu.isPending ? 'Saving…' : 'Save Changes'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

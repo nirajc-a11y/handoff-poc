@@ -2,8 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Bot, Headphones, GitBranch, Copy, Check, X } from 'lucide-react'
 import { selectedConvIdAtom } from '@/stores/ui'
-import { useConversation } from '@/hooks/use-conversations'
-import { cn, stateColors, channelIcons, formatDuration, timeSince } from '@/lib/utils'
+import { useConversation, useConversationHandoffs } from '@/hooks/use-conversations'
+import { useEmailThread } from '@/hooks/use-email-thread'
+import { cn, stateColors, channelIcons, formatDuration, formatTime, timeSince } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { MessageThread } from './message-thread'
@@ -90,7 +91,8 @@ export function ConversationDetail() {
   const selectedId = useAtomValue(selectedConvIdAtom)
   const setSelectedId = useSetAtom(selectedConvIdAtom)
   const { data: conversation, isLoading } = useConversation(selectedId)
-  const [tab, setTab] = useState<'messages' | 'transcript'>('messages')
+  const { data: handoffs = [] } = useConversationHandoffs(selectedId)
+  const [tab, setTab] = useState<'messages' | 'transcript' | 'handoffs' | 'email-thread'>('messages')
   const scrollRef = useRef<HTMLDivElement>(null)
 
   if (!selectedId) {
@@ -217,18 +219,23 @@ export function ConversationDetail() {
 
       {/* Tab bar */}
       <div className="shrink-0 flex gap-1 border-b border-gray-100 px-4 pt-1">
-        {(['messages', 'transcript'] as const).map((t) => (
+        {([
+          { key: 'messages', label: 'Messages' },
+          { key: 'transcript', label: 'Transcript' },
+          { key: 'handoffs', label: `Handoffs${handoffs.length > 0 ? ` (${handoffs.length})` : ''}` },
+          ...(conversation.channel === 'email' ? [{ key: 'email-thread', label: 'Email Thread' }] : []),
+        ] as const).map((t) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
+            key={t.key}
+            onClick={() => setTab(t.key as typeof tab)}
             className={cn(
-              'px-2 py-1.5 text-xs font-medium capitalize transition-colors border-b-2 -mb-px',
-              tab === t
+              'px-2 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px',
+              tab === t.key
                 ? 'border-foreground text-foreground'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
             )}
           >
-            {t === 'messages' ? 'Messages' : 'Transcript'}
+            {t.label}
           </button>
         ))}
       </div>
@@ -240,11 +247,10 @@ export function ConversationDetail() {
         className="min-h-0 flex-1 overflow-y-auto"
         style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}
       >
-        {tab === 'messages' ? (
-          <MessageThread conversationId={conversation.id} />
-        ) : (
-          <TranscriptPanel conversationId={conversation.id} />
-        )}
+        {tab === 'messages' && <MessageThread conversationId={conversation.id} />}
+        {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
+        {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
+        {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
       </div>
 
       {/* Message input (only on messages tab) */}
@@ -256,6 +262,87 @@ export function ConversationDetail() {
 
       {/* Action bar */}
       <ActionBar conversation={conversation} />
+    </div>
+  )
+}
+
+function HandoffTimeline({ events }: { events: import('@/lib/types').HandoffEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 py-12">
+        <GitBranch className="size-6 text-gray-300" />
+        <p className="text-xs text-gray-400">No handoff events yet</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2 p-4">
+      {events.map((event, i) => (
+        <div key={event.id ?? i} className="flex items-start gap-2">
+          <div className="mt-0.5 size-5 rounded-full bg-gray-100 flex items-center justify-center shrink-0">
+            <Phone className="size-3 text-gray-500" />
+          </div>
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="font-medium capitalize">{event.event_type.replace(/_/g, ' ')}</span>
+              <span className="text-gray-400">{formatTime(event.created_at)}</span>
+            </div>
+            <div className="flex items-center gap-1 text-xs text-gray-500">
+              {event.from_state && <span className="capitalize">{event.from_state.replace(/_/g, ' ')}</span>}
+              {event.from_state && event.to_state && <span className="text-gray-300">-&gt;</span>}
+              {event.to_state && <span className="capitalize">{event.to_state.replace(/_/g, ' ')}</span>}
+            </div>
+            {event.from_handler_type && event.to_handler_type && (
+              <div className="flex items-center gap-1 text-[11px] text-gray-400">
+                <span className="capitalize">{event.from_handler_type}</span>
+                <span>-&gt;</span>
+                <span className="capitalize">{event.to_handler_type}</span>
+              </div>
+            )}
+            {event.reason && <p className="text-xs text-gray-400 truncate">{event.reason}</p>}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EmailThreadPanel({ conversationId }: { conversationId: string }) {
+  const { data: thread = [], isLoading } = useEmailThread(conversationId)
+
+  if (isLoading) {
+    return <p className="py-8 text-center text-xs text-gray-400">Loading email thread…</p>
+  }
+
+  if (thread.length === 0) {
+    return <p className="py-8 text-center text-xs text-gray-400">No emails in this thread</p>
+  }
+
+  return (
+    <div className="flex flex-col gap-3 p-4">
+      {thread.map((msg) => (
+        <div key={msg.id} className="rounded-lg border bg-white p-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-2">
+              <span className={cn(
+                'text-xs font-medium capitalize',
+                msg.sender_type === 'customer' ? 'text-blue-600' : 'text-gray-700'
+              )}>
+                {msg.sender_type}
+              </span>
+              {msg.email_subject && (
+                <span className="text-xs text-gray-500 truncate max-w-48">{msg.email_subject}</span>
+              )}
+            </div>
+            <span className="text-[10px] text-gray-400">{formatTime(msg.created_at)}</span>
+          </div>
+          <div
+            className="text-xs text-gray-600 prose prose-xs max-w-none"
+            dangerouslySetInnerHTML={{ __html: msg.content ?? '' }}
+          />
+        </div>
+      ))}
     </div>
   )
 }

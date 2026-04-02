@@ -1,5 +1,14 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import type { Conversation } from '@/lib/types'
+
+export function useCall(id: string | null) {
+  return useQuery<Conversation>({
+    queryKey: ['calls', id],
+    queryFn: () => api.get(`/calls/${id}`),
+    enabled: !!id,
+  })
+}
 
 export function useDialOutbound() {
   const qc = useQueryClient()
@@ -18,6 +27,7 @@ export function useCallAction(conversationId: string) {
     end: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/end`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
     forceEnd: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/force-end`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
     answer: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/answer`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
+    dtmf: useMutation({ mutationFn: (digit: string) => api.post(`/calls/${conversationId}/dtmf`, { digit }), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
   }
 }
 
