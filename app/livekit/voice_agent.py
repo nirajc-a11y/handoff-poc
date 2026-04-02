@@ -70,8 +70,8 @@ class VoiceAISession:
 
         # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
         self.silence_threshold = 200  # RMS below this = silence (16-bit PCM scale)
-        self.silence_duration_frames = 24000  # ~3 seconds
-        self.min_speech_frames = 4000  # ~0.5 seconds
+        self.silence_duration_frames = 12000  # ~1.5 seconds (was 3s — too slow)
+        self.min_speech_frames = 3200  # ~0.4 seconds
 
     def add_audio(self, mulaw_chunk: bytes) -> bool:
         """Add audio chunk. Returns True if speech pause detected."""
@@ -83,17 +83,24 @@ class VoiceAISession:
         # (silence = 0xFF, not 0x80), so we must decode first.
         pcm = audioop.ulaw2lin(mulaw_chunk, 2)
         rms_energy = audioop.rms(pcm, 2)
-        # Debug: log energy every ~1 second (50 chunks of 160 bytes at 8kHz = 1s)
-        if len(self.audio_buffer) % 8000 < len(mulaw_chunk):
-            print(f">>> AUDIO rms={rms_energy}, buffer={len(self.audio_buffer)}, silence_frames={self.silence_frames}")
         if rms_energy < self.silence_threshold:
             self.silence_frames += len(mulaw_chunk)
         else:
             self.silence_frames = 0
         return len(self.audio_buffer) > self.min_speech_frames and self.silence_frames >= self.silence_duration_frames
 
+    def flush_buffer(self):
+        """Discard any buffered audio (call after TTS playback to avoid echo)."""
+        self.audio_buffer.clear()
+        self.silence_frames = 0
+
     async def process_turn(self, db_session=None) -> bytes | None:
-        """Process buffered audio: STT -> LLM -> TTS. Returns mulaw audio."""
+        """Process buffered audio: STT -> LLM -> TTS. Returns mulaw audio.
+
+        IMPORTANT: is_speaking remains True after return — the caller must
+        call finish_speaking() after send_audio() completes to prevent
+        echo from being captured during TTS playback.
+        """
         if len(self.audio_buffer) < self.min_speech_frames:
             self.audio_buffer.clear()
             self.silence_frames = 0
@@ -141,10 +148,19 @@ class VoiceAISession:
             self.should_escalate = ai_response.should_escalate
             self.should_end_call = ai_response.should_end_call
 
-            # TTS
-            tts_audio = await sarvam.synthesize(ai_response.text, self.language, self.speaker)
+            # TTS — truncate long responses to keep latency low
+            # Sarvam TTS latency scales with text length (~1s per 50 words)
+            tts_text = ai_response.text
+            if len(tts_text) > 300:
+                # Cut at last sentence boundary within limit
+                cut = tts_text[:300].rfind(".")
+                if cut > 100:
+                    tts_text = tts_text[:cut + 1]
+                else:
+                    tts_text = tts_text[:300]
+            tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker, pace=1.15)
             mulaw_audio = _wav_to_mulaw(tts_audio)
-            self.is_speaking = False
+            # NOTE: is_speaking stays True — caller must call finish_speaking()
             return mulaw_audio
 
         except httpx.HTTPStatusError as exc:
@@ -158,6 +174,12 @@ class VoiceAISession:
             logger.exception("Unexpected error in voice AI turn %d", self.turn_count)
             self.is_speaking = False
             return None
+
+    def finish_speaking(self):
+        """Mark TTS playback as complete and discard any echo audio captured."""
+        self.is_speaking = False
+        self.audio_buffer.clear()
+        self.silence_frames = 0
 
     async def get_greeting_audio(self) -> bytes | None:
         """Generate greeting TTS audio."""

@@ -32,7 +32,7 @@ async def transcribe(audio_data: bytes, language: str = "en") -> str:
             f"{SARVAM_BASE}/speech-to-text-translate",
             headers={"api-subscription-key": settings.sarvam_api_key},
             files={"file": ("audio.wav", audio_data, "audio/wav")},
-            data={"model": "saaras:v3", "language_code": lang_code},
+            data={"model": "saaras:flash", "language_code": lang_code},
         )
         if resp.status_code >= 400:
             logger.error("Sarvam STT error %d for lang=%s: %s", resp.status_code, lang_code, resp.text[:500])

@@ -395,7 +395,7 @@ async def _handle_ai_handoff(
     tenant_config = tenant_result.scalar_one_or_none() or {}
     voice_mode = tenant_config.get("voice_ai_mode", "plivo")
     sarvam_speaker = tenant_config.get("sarvam_speaker", "ritu")
-    print(f"\n>>> AI HANDOFF: voice_mode={voice_mode}, lang={lang}, speaker={sarvam_speaker}, sarvam_key={'SET' if settings.sarvam_api_key else 'EMPTY'}")
+    logger.info("AI handoff: voice_mode=%s, lang=%s, speaker=%s", voice_mode, lang, sarvam_speaker)
 
     if voice_mode == "livekit" and not settings.sarvam_api_key:
         logger.error(
@@ -426,7 +426,6 @@ async def _handle_ai_handoff(
     {s_greet}
     <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">{escaped_url}</Stream>
 </Response>"""
-        print(f">>> LIVEKIT XML:\n{xml}")
         return xml_response(xml)
 
     # Mode A (default): Record + transcribe + LLM + Plivo TTS

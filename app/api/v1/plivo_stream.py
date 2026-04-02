@@ -12,6 +12,7 @@ import uuid as _uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
+from starlette.websockets import WebSocketState
 
 from app.config import settings
 from app.core.events import Event, event_bus
@@ -114,7 +115,6 @@ async def plivo_audio_stream(
 ):
     """Bidirectional audio stream from Plivo <Stream>."""
     await ws.accept()
-    print(f"\n>>> WEBSOCKET CONNECTED: conv={conv_id}, lang={language}, speaker={speaker}, skip_greeting={skip_greeting}")
     logger.info("Plivo audio stream connected: conv=%s, lang=%s, speaker=%s", conv_id, language, speaker)
 
     session = VoiceAISession(
@@ -124,15 +124,19 @@ async def plivo_audio_stream(
 
     stream_started = False
     stream_sid = ""
+    ws_open = True
     processing_lock = asyncio.Lock()
 
     async def send_audio(mulaw_data: bytes):
-        if not stream_started:
-            logger.warning("send_audio called but stream not started yet, buffering skipped")
+        """Send mulaw audio back to Plivo. Keeps is_speaking=True to block echo."""
+        nonlocal ws_open
+        if not stream_started or not ws_open:
             return
         logger.info("Sending %d bytes of mulaw audio (%d chunks)", len(mulaw_data), len(mulaw_data) // 320 + 1)
         chunk_size = 320  # 20ms at 8kHz mulaw
         for i in range(0, len(mulaw_data), chunk_size):
+            if not ws_open:
+                break
             chunk = mulaw_data[i:i + chunk_size]
             try:
                 await ws.send_json({
@@ -144,23 +148,30 @@ async def plivo_audio_stream(
                         "payload": base64.b64encode(chunk).decode("ascii"),
                     },
                 })
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.018)
             except Exception:
-                logger.exception("Error sending audio chunk")
+                ws_open = False
                 break
 
     async def process_and_respond():
+        nonlocal ws_open
         async with processing_lock:
             async with async_session_factory() as db:
                 mulaw_response = await session.process_turn(db_session=db)
-                if mulaw_response:
+                if mulaw_response and ws_open:
+                    # is_speaking is True during send_audio — blocks echo capture
                     await send_audio(mulaw_response)
+                    # Now flush any echo audio and re-enable listening
+                    session.finish_speaking()
                     if conv_id and tenant_id:
                         await event_bus.publish(Event(
                             topic="conversation.message_added",
                             tenant_id=_uuid.UUID(tenant_id),
                             payload={"conversation_id": conv_id},
                         ))
+                elif not mulaw_response:
+                    # STT returned empty — just reset
+                    session.finish_speaking()
                 await db.commit()
 
                 # After sending AI response, check if escalation or hangup is needed
@@ -185,12 +196,9 @@ async def plivo_audio_stream(
             if event_type == "start":
                 stream_started = True
                 start_data = msg.get("start", {})
-                # Plivo uses "streamId", Twilio uses "streamSid"
                 stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
-                print(f">>> STREAM STARTED: sid={stream_sid}")
-                logger.info("Stream started: sid=%s, keys=%s", stream_sid, list(start_data.keys()))
+                logger.info("Stream started: sid=%s", stream_sid)
                 if greeting_audio:
-                    print(f">>> SENDING GREETING: {len(greeting_audio)} bytes")
                     await send_audio(greeting_audio)
 
             elif event_type == "media":
@@ -210,4 +218,5 @@ async def plivo_audio_stream(
     except Exception:
         logger.exception("Error in Plivo audio stream")
     finally:
+        ws_open = False
         logger.info("Audio stream ended: conv=%s, turns=%d", conv_id, session.turn_count)
