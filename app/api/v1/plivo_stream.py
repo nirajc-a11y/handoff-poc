@@ -161,7 +161,13 @@ async def plivo_audio_stream(
                 if mulaw_response and ws_open:
                     # is_speaking is True during send_audio — blocks echo capture
                     await send_audio(mulaw_response)
-                    # Now flush any echo audio and re-enable listening
+                    # Wait for Plivo to finish PLAYING the audio before re-listening.
+                    # We sent chunks faster than real-time, so Plivo is still playing.
+                    playback_secs = len(mulaw_response) / 8000
+                    send_secs = (len(mulaw_response) // 320 + 1) * 0.018
+                    remaining = playback_secs - send_secs
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
                     session.finish_speaking()
                     if conv_id and tenant_id:
                         await event_bus.publish(Event(
