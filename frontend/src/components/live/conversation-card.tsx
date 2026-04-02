@@ -31,9 +31,9 @@ export function ConversationCard({ conversation, selected, onClick }: Conversati
     <button
       onClick={onClick}
       className={cn(
-        'flex w-full items-start gap-2.5 rounded-lg border p-2.5 text-left transition-all',
+        'flex w-full items-start gap-2.5 rounded-sm border p-2.5 text-left transition-all',
         selected
-          ? 'border-blue-200 bg-blue-50/80 shadow-sm'
+          ? 'border-blue-200 bg-blue-50/60'
           : 'border-transparent hover:bg-gray-50 hover:border-gray-200',
         isEnded && !selected && 'opacity-60'
       )}

@@ -80,13 +80,32 @@ Copy the `https://xxxx.ngrok-free.dev` URL and set it in `.env`:
 BASE_WEBHOOK_URL=https://xxxx-xxxx.ngrok-free.dev
 ```
 
-## 6. Configure Plivo Webhooks
+## 6. Configure Plivo Webhooks & Create Softphone Endpoints
 
 ```bash
 python -m scripts.setup_plivo
 ```
 
-This registers the ngrok URL with Plivo for answer/hangup/DTMF callbacks.
+This registers the ngrok URL with Plivo for answer/hangup/DTMF callbacks, and creates 3 agent SIP endpoints for the browser softphone.
+
+### Softphone Login Credentials
+
+After running `setup_plivo`, Plivo creates endpoints with auto-suffixed usernames. Use the **full username** (with numbers) printed in the output:
+
+| Alias | Username (example) | Password |
+|-------|-------------------|----------|
+| AliceJohnson | `aliceagent<random_suffix>` | `Alice12345` |
+| BobSmith | `bobagent<random_suffix>` | `Bob12345` |
+| CarolDavis | `carolagent<random_suffix>` | `Carol12345` |
+
+**Important:** Plivo appends random digits to the username (e.g. `aliceagent9505220685950983383550`). Copy the exact full username from the script output or the Plivo console. Using just `aliceagent` will fail with "Authentication Error".
+
+To find your endpoint usernames later, check the Plivo console at https://console.plivo.com/phlo/endpoint/ or run:
+
+```bash
+curl -s "https://api.plivo.com/v1/Account/$PLIVO_AUTH_ID/Endpoint/?limit=20" \
+  -u "$PLIVO_AUTH_ID:$PLIVO_AUTH_TOKEN" | python -m json.tool
+```
 
 ## 7. Start Backend
 
@@ -196,7 +215,7 @@ Runs all 6 handoff scenarios via API calls — useful for testing state machine 
 | Empty STT flooding (many empty transcripts) | Normal during silence — skipped automatically by RMS energy check |
 | ngrok URL expired | Restart ngrok and update `BASE_WEBHOOK_URL` in `.env`, then restart server |
 | Frontend not connecting | Ensure tenant ID is entered, check browser console for WS errors |
-| Softphone not registering | Plivo WebRTC requires separate endpoint credentials (username/password from Plivo console) |
+| Softphone not registering | Use the **full** Plivo endpoint username (with random suffix, e.g. `aliceagent9505220685950983383550`), not just `aliceagent`. Run `setup_plivo` to create endpoints if they don't exist. |
 
 ## Architecture Summary
 

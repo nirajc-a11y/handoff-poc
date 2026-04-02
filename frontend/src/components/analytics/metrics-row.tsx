@@ -17,7 +17,7 @@ function MetricCard({ label, value, icon, sub }: MetricCardProps) {
   return (
     <Card className="flex-1 min-w-0">
       <CardContent className="flex items-center gap-3 py-4">
-        <div className="flex size-10 items-center justify-center rounded-lg bg-gray-100 text-gray-600 shrink-0">
+        <div className="flex size-10 items-center justify-center rounded-md bg-muted text-muted-foreground shrink-0">
           {icon}
         </div>
         <div className="min-w-0 flex-1">

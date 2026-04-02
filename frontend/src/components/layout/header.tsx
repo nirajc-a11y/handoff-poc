@@ -4,6 +4,7 @@ import { Phone } from 'lucide-react'
 import { isConnectedAtom } from '@/stores/auth'
 import { cn } from '@/lib/utils'
 import { TenantSelector } from './tenant-selector'
+import { SoftphoneIndicator } from './softphone-indicator'
 
 export function Header() {
   const isConnected = useAtomValue(isConnectedAtom)
@@ -15,10 +16,10 @@ export function Header() {
   }, [])
 
   return (
-    <header className="flex h-16 shrink-0 items-center justify-between border-b border-gray-200 bg-white px-4">
+    <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-white px-4">
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-blue-600">
+          <div className="flex size-8 items-center justify-center rounded-md bg-blue-600">
             <Phone className="size-4 text-white" />
           </div>
           <div>
@@ -30,6 +31,8 @@ export function Header() {
 
       <div className="flex items-center gap-4">
         <TenantSelector />
+
+        <SoftphoneIndicator />
 
         <div className="flex items-center gap-2">
           <div

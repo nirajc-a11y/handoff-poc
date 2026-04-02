@@ -14,9 +14,9 @@ export function ConversationList() {
   const queued = active.filter((c) => c.state === 'queued_for_human')
 
   return (
-    <div className="flex h-full flex-col border-r border-gray-200 bg-white">
+    <div className="flex h-full flex-col border-r border-border bg-white">
       <Tabs defaultValue="active" className="flex h-full flex-col gap-0">
-        <div className="shrink-0 border-b border-gray-200 px-2 pt-2">
+        <div className="shrink-0 border-b border-border px-2 pt-2">
           <TabsList variant="line" className="w-full">
             <TabsTrigger value="active" className="flex-1 text-xs">
               Active ({nonEnded.length})

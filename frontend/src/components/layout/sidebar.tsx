@@ -41,7 +41,7 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: Sideba
   return (
     <div
       className={cn(
-        'flex h-full flex-col border-r border-gray-200 bg-white transition-all duration-200',
+        'flex h-full flex-col border-r border-border bg-white transition-all duration-200',
         collapsed ? 'w-14' : 'w-52'
       )}
     >
@@ -62,10 +62,10 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: Sideba
                 key={item.key}
                 onClick={() => onNavigate(item.key)}
                 className={cn(
-                  'flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+                  'flex w-full items-center gap-3 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors',
                   isActive
                     ? 'bg-blue-50 text-blue-700'
-                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                    : 'text-gray-600 hover:bg-muted hover:text-gray-900'
                 )}
               >
                 <Icon className="size-4 shrink-0" />

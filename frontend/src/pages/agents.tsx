@@ -9,7 +9,7 @@ export function AgentsPage() {
   const [showForm, setShowForm] = useState(false)
 
   return (
-    <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-white">
+    <div className="flex h-full overflow-hidden bg-background">
       {/* Main area */}
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-6">
         <div>

@@ -84,7 +84,7 @@ export function ActionBar({ conversation }: ActionBarProps) {
 
   return (
     <TooltipProvider>
-      <div className="flex items-center gap-1 border-t border-gray-200 bg-white px-3 py-2">
+      <div className="flex items-center gap-1 border-t border-border bg-white px-3 py-2">
         <Tooltip>
           <TooltipTrigger
             render={

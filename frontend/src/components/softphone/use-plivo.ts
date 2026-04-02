@@ -1,4 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
+import { useSetAtom } from 'jotai'
+import { plivoRegisteredAtom, plivoOnCallAtom, plivoRingingAtom } from '@/stores/softphone'
 
 declare global {
   interface Window {
@@ -23,6 +25,9 @@ export function usePlivo() {
   })
   const plivoRef = useRef<any>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const setGlobalRegistered = useSetAtom(plivoRegisteredAtom)
+  const setGlobalOnCall = useSetAtom(plivoOnCallAtom)
+  const setGlobalRinging = useSetAtom(plivoRingingAtom)
 
   // Load Plivo SDK script dynamically
   useEffect(() => {
@@ -43,6 +48,13 @@ export function usePlivo() {
     }
   }, [])
 
+  // Sync local state to global atoms for header indicator
+  useEffect(() => {
+    setGlobalRegistered(state.isRegistered)
+    setGlobalOnCall(state.isOnCall)
+    setGlobalRinging(state.isRinging)
+  }, [state.isRegistered, state.isOnCall, state.isRinging, setGlobalRegistered, setGlobalOnCall, setGlobalRinging])
+
   const startTimer = useCallback(() => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
     setState(s => ({ ...s, callDuration: 0 }))
@@ -62,7 +74,7 @@ export function usePlivo() {
       const p = new window.Plivo({ debug: 'ALL', permOnClick: true, enableTracking: true })
       plivoRef.current = p
 
-      p.client.on('ready', () => setState(s => ({ ...s, isRegistered: true })))
+      p.client.on('onLogin', () => setState(s => ({ ...s, isRegistered: true })))
       p.client.on('onLoginFailed', () => setState(s => ({ ...s, isRegistered: false })))
       p.client.on('onIncomingCall', (callerId: string) => {
         setState(s => ({ ...s, isRinging: true, callerId }))

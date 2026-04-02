@@ -22,7 +22,7 @@ export function ActiveCall({
   onHangup,
 }: ActiveCallProps) {
   return (
-    <div className="flex flex-col items-center gap-3 px-3 py-3">
+    <div className="flex flex-col items-center gap-4 p-4">
       {/* Caller info */}
       <div className="text-center">
         <p className="text-[10px] uppercase tracking-wider text-gray-400">On Call</p>
@@ -39,7 +39,7 @@ export function ActiveCall({
           onClick={onToggleMute}
           title={isMuted ? 'Unmute' : 'Mute'}
           className={cn(
-            'flex size-9 items-center justify-center rounded-full border transition-colors active:scale-95',
+            'flex size-10 items-center justify-center rounded-lg border transition-colors active:scale-95',
             isMuted
               ? 'border-orange-300 bg-orange-100 text-orange-600'
               : 'border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200'
@@ -53,7 +53,7 @@ export function ActiveCall({
           onClick={onToggleHold}
           title={isOnHold ? 'Resume' : 'Hold'}
           className={cn(
-            'flex size-9 items-center justify-center rounded-full border transition-colors active:scale-95',
+            'flex size-10 items-center justify-center rounded-lg border transition-colors active:scale-95',
             isOnHold
               ? 'border-yellow-300 bg-yellow-100 text-yellow-700'
               : 'border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200'
@@ -66,7 +66,7 @@ export function ActiveCall({
         <button
           onClick={onHangup}
           title="End Call"
-          className="flex size-9 items-center justify-center rounded-full bg-red-500 text-white shadow transition-colors hover:bg-red-600 active:scale-95"
+          className="flex size-10 items-center justify-center rounded-full bg-red-500 text-white shadow transition-colors hover:bg-red-600 active:scale-95"
         >
           <PhoneOff className="size-4" />
         </button>

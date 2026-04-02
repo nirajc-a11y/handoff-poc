@@ -25,14 +25,14 @@ export function IncomingCall({ callerId, onAnswer, onReject }: IncomingCallProps
       <div className="flex items-center gap-3">
         <button
           onClick={onReject}
-          className="flex size-10 items-center justify-center rounded-full bg-red-500 text-white shadow transition-transform hover:bg-red-600 active:scale-95"
+          className="flex size-11 items-center justify-center rounded-lg bg-red-500 text-white shadow transition-transform hover:bg-red-600 active:scale-95"
           title="Reject"
         >
           <PhoneOff className="size-4" />
         </button>
         <button
           onClick={onAnswer}
-          className="flex size-10 items-center justify-center rounded-full bg-green-500 text-white shadow transition-transform hover:bg-green-600 active:scale-95"
+          className="flex size-11 items-center justify-center rounded-lg bg-green-500 text-white shadow transition-transform hover:bg-green-600 active:scale-95"
           title="Answer"
         >
           <Phone className="size-4" />

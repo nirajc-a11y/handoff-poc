@@ -31,7 +31,7 @@ export function CampaignsPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-64px)] flex-col gap-4 overflow-y-auto bg-white p-6">
+    <div className="flex h-full flex-col gap-4 overflow-y-auto bg-background p-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">Campaigns</h1>

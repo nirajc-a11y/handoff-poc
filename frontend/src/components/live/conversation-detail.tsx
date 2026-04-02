@@ -44,7 +44,7 @@ function CallFlowBar({ state }: { state: string }) {
               )} />
             )}
             <div className={cn(
-              'flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap transition-all',
+              'flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-medium whitespace-nowrap transition-all',
               isCurrent && 'bg-blue-100 text-blue-700 ring-1 ring-blue-300',
               isPast && 'bg-green-50 text-green-600',
               isFuture && 'bg-gray-50 text-gray-400',
@@ -99,8 +99,8 @@ export function ConversationDetail() {
 
   if (!selectedId) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 bg-white border-x border-gray-200">
-        <div className="flex size-16 items-center justify-center rounded-2xl bg-gray-50">
+      <div className="flex h-full flex-col items-center justify-center gap-3 bg-white border-x border-border">
+        <div className="flex size-16 items-center justify-center rounded-lg bg-muted">
           <Phone className="size-7 text-gray-300" />
         </div>
         <div className="text-center">
@@ -113,7 +113,7 @@ export function ConversationDetail() {
 
   if (isLoading || !conversation) {
     return (
-      <div className="flex h-full items-center justify-center bg-white border-x border-gray-200">
+      <div className="flex h-full items-center justify-center bg-white border-x border-border">
         <div className="flex items-center gap-2 text-gray-400">
           <div className="size-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
           <p className="text-sm">Loading...</p>
@@ -130,14 +130,14 @@ export function ConversationDetail() {
   const lang = (conversation.context as Record<string, string>)?.language
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-white border-x border-gray-200">
+    <div className="flex h-full flex-col overflow-hidden bg-white border-x border-border">
       {/* Customer header */}
-      <div className="shrink-0 border-b border-gray-200 px-4 py-3 space-y-2.5">
+      <div className="shrink-0 border-b border-border px-4 py-3 space-y-2.5">
         {/* Row 1: Customer info */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className={cn(
-              'flex size-10 items-center justify-center rounded-full text-lg',
+              'flex size-10 items-center justify-center rounded-lg text-lg',
               isInbound ? 'bg-green-50' : 'bg-blue-50'
             )}>
               {isInbound ? <PhoneIncoming className="size-5 text-green-600" /> : <PhoneOutgoing className="size-5 text-blue-600" />}
