@@ -91,18 +91,21 @@ async def _handle_stream_hangup(db, tenant_id: str, conv_id: str):
 
     try:
         # Transition: AI_HANDLING -> WRAP_UP -> ENDED
-        await handoff_engine.process_trigger(
-            db=db,
-            conversation_id=conv_uuid,
-            trigger=Trigger.AGENT_END,
-            metadata={"reason": "Customer said goodbye", "disposition": "resolved"},
-        )
-        await handoff_engine.process_trigger(
-            db=db,
-            conversation_id=conv_uuid,
-            trigger=Trigger.DISPOSITION_SUBMITTED,
-            metadata={"disposition": "resolved"},
-        )
+        # Each trigger is guarded — Plivo call-status webhook may race and
+        # transition the conversation to ENDED before we get here.
+        for trigger in (Trigger.AGENT_END, Trigger.DISPOSITION_SUBMITTED):
+            try:
+                await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conv_uuid,
+                    trigger=trigger,
+                    metadata={"reason": "Customer said goodbye", "disposition": "resolved"},
+                )
+            except Exception as exc:
+                if "not allowed in state" in str(exc):
+                    logger.info("Skipping %s for conv=%s (already transitioned)", trigger.value, conv_id)
+                    break
+                raise
         await db.commit()
         logger.info("Call ended by AI (customer goodbye): conv=%s", conv_id)
     except Exception:
