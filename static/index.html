@@ -1,0 +1,2205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Angel Tel — Operations Center</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Inter"', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'Fira Code', 'monospace'],
+          },
+          colors: {
+            brand: { 50: '#eef2ff', 100: '#e0e7ff', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' },
+          },
+          keyframes: {
+            fadeSlideIn: { '0%': { opacity: 0, transform: 'translateY(-6px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } },
+            fadeIn: { '0%': { opacity: 0 }, '100%': { opacity: 1 } },
+            pulseRing: { '0%': { boxShadow: '0 0 0 0 rgba(34,197,94,0.5)' }, '70%': { boxShadow: '0 0 0 8px rgba(34,197,94,0)' }, '100%': { boxShadow: '0 0 0 0 rgba(34,197,94,0)' } },
+            slideUp: { '0%': { opacity: 0, transform: 'translateY(20px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } },
+            toastIn: { '0%': { opacity: 0, transform: 'translateX(100%)' }, '100%': { opacity: 1, transform: 'translateX(0)' } },
+            toastOut: { '0%': { opacity: 1, transform: 'translateX(0)' }, '100%': { opacity: 0, transform: 'translateX(100%)' } },
+          },
+          animation: {
+            fadeSlideIn: 'fadeSlideIn 0.3s ease-out',
+            fadeIn: 'fadeIn 0.2s ease-out',
+            pulseRing: 'pulseRing 1.5s infinite',
+            slideUp: 'slideUp 0.3s ease-out',
+            toastIn: 'toastIn 0.3s ease-out',
+            toastOut: 'toastOut 0.3s ease-in forwards',
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    /* Status dots */
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .status-dot.connected { background: #22c55e; animation: pulseRing 1.5s infinite; }
+    .status-dot.disconnected { background: #ef4444; }
+    .status-dot.reconnecting { background: #f59e0b; animation: pulseRing 1s infinite; }
+
+    /* Card glow on update */
+    @keyframes cardGlow {
+      0% { box-shadow: 0 0 0 2px rgba(99,102,241,0.4), 0 0 12px rgba(99,102,241,0.1); }
+      100% { box-shadow: 0 0 0 0 rgba(99,102,241,0), 0 0 0 rgba(99,102,241,0); }
+    }
+    .card-updated { animation: cardGlow 1.2s ease-out; }
+
+    /* Conversation card selected state */
+    .conv-card { transition: all 0.15s ease; cursor: pointer; }
+    .conv-card:hover { background: #f1f5f9; }
+    .conv-card.selected { background: #eef2ff; border-left: 3px solid #6366f1; }
+
+    /* Message bubbles */
+    .msg-customer { background: #f1f5f9; border-radius: 12px 12px 12px 4px; }
+    .msg-agent { background: #eef2ff; border-radius: 12px 12px 4px 12px; }
+    .msg-ai { background: #faf5ff; border-radius: 12px 12px 12px 4px; border: 1px solid #e9d5ff; }
+    .msg-system { background: #fefce8; border-radius: 8px; border: 1px solid #fef08a; font-size: 12px; text-align: center; }
+
+    /* Tab active */
+    .tab-btn { transition: all 0.2s; }
+    .tab-btn.active { color: #4f46e5; border-bottom: 2px solid #4f46e5; font-weight: 600; }
+
+    /* Toast container */
+    #toastContainer { position: fixed; top: 80px; right: 20px; z-index: 10000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+    .toast { pointer-events: auto; }
+
+    /* Modal overlay */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
+      z-index: 9000; display: flex; align-items: center; justify-content: center;
+    }
+    .modal-overlay.hidden { display: none; }
+
+    /* Softphone panel */
+    .softphone-panel {
+      position: fixed; bottom: 20px; right: 20px; width: 340px; z-index: 9999;
+      border-radius: 16px; overflow: hidden; background: white;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.03);
+      transition: transform 0.3s ease, opacity 0.3s ease;
+    }
+    .softphone-panel.collapsed { transform: translateY(calc(100% - 52px)); }
+    .softphone-panel.collapsed .softphone-body { opacity: 0; pointer-events: none; }
+
+    /* Incoming call animation */
+    @keyframes incomingPulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+      50% { box-shadow: 0 0 0 12px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+    .sp-incoming-ring { animation: incomingPulse 1.5s ease-out infinite; border-color: rgba(34,197,94,0.5) !important; }
+    .sp-hidden { display: none !important; }
+  </style>
+</head>
+<body class="min-h-screen text-gray-800">
+
+  <!-- ====== TOAST CONTAINER ====== -->
+  <div id="toastContainer"></div>
+
+  <!-- ====== TOP BAR ====== -->
+  <header class="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-gray-200">
+    <div class="max-w-[1920px] mx-auto px-4 lg:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <!-- Logo -->
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 bg-brand-600 rounded-xl flex items-center justify-center shadow-sm">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg>
+        </div>
+        <div>
+          <h1 class="text-lg font-bold text-gray-900 leading-tight">Angel Tel</h1>
+          <p class="text-xs text-gray-400 -mt-0.5 font-medium tracking-wide">Operations Center</p>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="flex items-center gap-4 flex-wrap">
+        <!-- Tenant input -->
+        <div class="flex items-center gap-2">
+          <label for="tenantInput" class="text-xs text-gray-400 font-semibold uppercase tracking-wider hidden sm:block">Tenant</label>
+          <input id="tenantInput" type="text" placeholder="Enter Tenant ID..."
+            class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent w-52 transition-shadow" />
+          <button id="connectBtn" onclick="connectDashboard()"
+            class="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-5 py-1.5 rounded-lg transition-colors shadow-sm hover:shadow">
+            Connect
+          </button>
+        </div>
+        <!-- Connection status -->
+        <div id="connStatus" class="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-full px-3 py-1.5">
+          <span class="status-dot disconnected" id="statusDot"></span>
+          <span class="text-xs font-medium text-gray-500" id="statusText">Disconnected</span>
+        </div>
+        <!-- Clock -->
+        <div class="text-xs text-gray-400 font-mono tabular-nums" id="clock">--:--:--</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ====== METRICS ROW ====== -->
+  <section class="max-w-[1920px] mx-auto px-4 lg:px-6 pt-4">
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <!-- Active Calls -->
+      <div class="metric-card bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Active Calls</span>
+          <div class="w-8 h-8 bg-green-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+          </div>
+        </div>
+        <div class="text-3xl font-bold text-gray-900 tabular-nums" id="metricActiveCalls">0</div>
+        <div class="text-xs text-gray-400 mt-1" id="metricActiveCallsSub">conversations</div>
+      </div>
+      <!-- Queue Depth -->
+      <div class="metric-card bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Queue Depth</span>
+          <div class="w-8 h-8 bg-orange-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          </div>
+        </div>
+        <div class="text-3xl font-bold text-gray-900 tabular-nums" id="metricQueueDepth">0</div>
+        <div class="text-xs text-gray-400 mt-1" id="metricQueueSub">waiting</div>
+      </div>
+      <!-- Avg Wait -->
+      <div class="metric-card bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Avg Wait</span>
+          <div class="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+        </div>
+        <div class="text-3xl font-bold text-gray-900 tabular-nums" id="metricAvgWait">--</div>
+        <div class="text-xs text-gray-400 mt-1" id="metricAvgWaitSub">&nbsp;</div>
+      </div>
+      <!-- Agents Available -->
+      <div class="metric-card bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Agents Online</span>
+          <div class="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </div>
+        </div>
+        <div class="text-3xl font-bold text-gray-900 tabular-nums" id="metricAgentsAvail">0</div>
+        <div class="text-xs text-gray-400 mt-1" id="metricAgentsAvailSub">available</div>
+      </div>
+      <!-- Campaign Progress -->
+      <div class="metric-card bg-white border border-gray-200 rounded-xl p-4 shadow-sm col-span-2 sm:col-span-1">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Campaign</span>
+          <div class="w-8 h-8 bg-violet-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path stroke-linecap="round" stroke-linejoin="round" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
+          </div>
+        </div>
+        <div class="text-3xl font-bold text-gray-900 tabular-nums" id="metricCampaignPct">--%</div>
+        <div class="text-xs text-gray-400 mt-1" id="metricCampaignSub">no campaign</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== MAIN 3-COLUMN LAYOUT ====== -->
+  <main class="max-w-[1920px] mx-auto px-4 lg:px-6 py-4 grid grid-cols-12 gap-4" style="min-height: calc(100vh - 220px);">
+
+    <!-- ====== LEFT COLUMN: Conversation List + Queue ====== -->
+    <section class="col-span-12 lg:col-span-3 flex flex-col">
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col flex-1 overflow-hidden">
+        <!-- Tabs -->
+        <div class="flex border-b border-gray-100 px-1">
+          <button class="tab-btn active flex-1 py-3 text-sm text-gray-500 text-center" data-tab="active" onclick="switchTab('active')">
+            Active <span id="tabActiveCount" class="text-xs text-gray-400">(0)</span>
+          </button>
+          <button class="tab-btn flex-1 py-3 text-sm text-gray-500 text-center" data-tab="queued" onclick="switchTab('queued')">
+            Queued <span id="tabQueuedCount" class="text-xs text-gray-400">(0)</span>
+          </button>
+          <button class="tab-btn flex-1 py-3 text-sm text-gray-500 text-center" data-tab="completed" onclick="switchTab('completed')">
+            Completed
+          </button>
+        </div>
+        <!-- Conversation list -->
+        <div id="convListActive" class="flex-1 overflow-y-auto divide-y divide-gray-50" style="max-height: calc(100vh - 340px);">
+          <div class="px-4 py-10 text-center text-gray-400 text-sm">No active conversations. Connect to begin.</div>
+        </div>
+        <div id="convListQueued" class="flex-1 overflow-y-auto divide-y divide-gray-50 hidden" style="max-height: calc(100vh - 340px);">
+          <div class="px-4 py-10 text-center text-gray-400 text-sm">No queued conversations.</div>
+        </div>
+        <div id="convListCompleted" class="flex-1 overflow-y-auto divide-y divide-gray-50 hidden" style="max-height: calc(100vh - 340px);">
+          <div class="px-4 py-10 text-center text-gray-400 text-sm">No completed conversations.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====== CENTER COLUMN: Conversation Detail ====== -->
+    <section class="col-span-12 lg:col-span-5 flex flex-col">
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col flex-1 overflow-hidden">
+        <!-- No selection placeholder -->
+        <div id="convDetailEmpty" class="flex-1 flex flex-col items-center justify-center text-gray-400 p-8">
+          <svg class="w-16 h-16 text-gray-200 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+          <p class="text-sm font-medium">Select a conversation</p>
+          <p class="text-xs mt-1">Click on a conversation from the left panel to view details</p>
+        </div>
+        <!-- Conversation detail (hidden until selection) -->
+        <div id="convDetailView" class="flex-1 flex flex-col hidden">
+          <!-- Customer header -->
+          <div id="convDetailHeader" class="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-10 h-10 bg-brand-50 border border-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold text-sm flex-shrink-0" id="convDetailAvatar">?</div>
+              <div class="min-w-0">
+                <div class="font-semibold text-gray-900 text-sm truncate" id="convDetailName">--</div>
+                <div class="flex items-center gap-2 text-xs text-gray-400">
+                  <span id="convDetailChannel">--</span>
+                  <span>&middot;</span>
+                  <span id="convDetailNumber">--</span>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <span id="convDetailStateBadge" class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold"></span>
+              <span id="convDetailDuration" class="text-xs text-gray-400 font-mono tabular-nums">--:--</span>
+            </div>
+          </div>
+          <!-- Messages -->
+          <div id="convMessages" class="flex-1 overflow-y-auto p-4 space-y-3" style="max-height: calc(100vh - 480px);">
+            <div class="text-center text-gray-400 text-sm py-8">Loading messages...</div>
+          </div>
+          <!-- Message input -->
+          <div id="convMessageInput" class="p-3 border-t border-gray-100">
+            <div class="flex gap-2">
+              <input type="text" id="msgInput" placeholder="Type a message..."
+                class="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                onkeydown="if(event.key==='Enter')sendMessage()" />
+              <button onclick="sendMessage()"
+                class="bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm">
+                Send
+              </button>
+            </div>
+          </div>
+          <!-- Action buttons -->
+          <div id="convActions" class="px-3 pb-3 flex flex-wrap gap-2">
+            <button onclick="doHoldUnhold()" id="btnHold" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-600 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              Hold
+            </button>
+            <button onclick="openTransferModal()" id="btnTransfer" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-600 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 014-4h12"/></svg>
+              Transfer
+            </button>
+            <button onclick="doEscalate()" id="btnEscalate" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 text-orange-700 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+              Escalate
+            </button>
+            <button onclick="doEndCall()" id="btnEndCall" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              End Call
+            </button>
+            <button onclick="openDispositionModal()" id="btnDisposition" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+              Disposition
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====== RIGHT COLUMN: Agents, Dialer, Campaign, Events ====== -->
+    <section class="col-span-12 lg:col-span-4 flex flex-col gap-4">
+
+      <!-- Agent Status Panel -->
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <svg class="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            Agents
+            <span class="text-xs font-normal text-gray-400" id="agentCount">(0)</span>
+          </h2>
+        </div>
+        <div id="agentGrid" class="p-3 grid grid-cols-1 xl:grid-cols-2 gap-2 max-h-[260px] overflow-y-auto">
+          <div class="text-center text-gray-400 text-sm py-6 col-span-full">No agents loaded.</div>
+        </div>
+      </div>
+
+      <!-- Dialer Panel -->
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100">
+          <h2 class="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <svg class="w-4 h-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+            Outbound Dialer
+          </h2>
+        </div>
+        <div class="p-4">
+          <div class="flex gap-2">
+            <input type="tel" id="dialerNumber" placeholder="+1 (555) 000-0000"
+              class="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              onkeydown="if(event.key==='Enter')dialOutbound()" />
+            <input type="text" id="dialerName" placeholder="Name (optional)"
+              class="w-32 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent" />
+            <button onclick="dialOutbound()"
+              class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+              Dial
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Campaign Panel -->
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <svg class="w-4 h-4 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/><path stroke-linecap="round" stroke-linejoin="round" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/></svg>
+            Campaign
+          </h2>
+          <select id="campaignSelect" class="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 text-gray-600 focus:outline-none focus:ring-2 focus:ring-brand-500">
+            <option value="">Select campaign...</option>
+          </select>
+        </div>
+        <div id="campaignPanel" class="p-4">
+          <div class="text-center text-gray-400 text-sm py-4">No active campaigns.</div>
+        </div>
+      </div>
+
+      <!-- Handoff Event Feed -->
+      <div class="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex-1">
+        <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <svg class="w-4 h-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            Event Feed
+          </h2>
+          <button onclick="clearEventFeed()" class="text-xs text-gray-400 hover:text-gray-600 transition-colors font-medium">Clear</button>
+        </div>
+        <div id="eventFeed" class="divide-y divide-gray-50 max-h-[300px] overflow-y-auto font-mono text-xs">
+          <div class="px-4 py-8 text-center text-gray-400 text-sm font-sans">Waiting for events...</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ====== DISPOSITION MODAL ====== -->
+  <div id="dispositionModal" class="modal-overlay hidden" onclick="if(event.target===this)closeDispositionModal()">
+    <div class="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-md mx-4 animate-slideUp">
+      <div class="px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-900">Submit Disposition</h3>
+        <p class="text-sm text-gray-400 mt-1">Record the outcome of this conversation.</p>
+      </div>
+      <div class="p-6 space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Disposition</label>
+          <select id="dispositionType"
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            <option value="">Select outcome...</option>
+            <option value="interested">Interested</option>
+            <option value="callback">Callback Requested</option>
+            <option value="not_interested">Not Interested</option>
+            <option value="resolved">Resolved</option>
+            <option value="follow_up">Follow Up Required</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+          <textarea id="dispositionNotes" rows="3" placeholder="Add notes about the conversation..."
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent resize-none"></textarea>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button onclick="closeDispositionModal()" class="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors">Cancel</button>
+        <button onclick="submitDisposition()" class="bg-brand-600 hover:bg-brand-700 text-white px-5 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm">Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== TRANSFER MODAL ====== -->
+  <div id="transferModal" class="modal-overlay hidden" onclick="if(event.target===this)closeTransferModal()">
+    <div class="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-md mx-4 animate-slideUp">
+      <div class="px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-900">Transfer Conversation</h3>
+        <p class="text-sm text-gray-400 mt-1">Select an agent to transfer this conversation to.</p>
+      </div>
+      <div class="p-6 space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Target Agent</label>
+          <select id="transferTarget"
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            <option value="">Select agent...</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-3">
+          <input type="checkbox" id="transferWarm" class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
+          <label for="transferWarm" class="text-sm text-gray-700">Warm transfer (stay on the line briefly)</label>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button onclick="closeTransferModal()" class="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors">Cancel</button>
+        <button onclick="submitTransfer()" class="bg-brand-600 hover:bg-brand-700 text-white px-5 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm">Transfer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== FOOTER ====== -->
+  <footer class="text-center text-xs text-gray-400 py-4 border-t border-gray-100 bg-white/50">
+    Angel Tel Operations Center &mdash; Real-time Call Center Dashboard
+  </footer>
+
+
+  <!-- ====================================================================== -->
+  <!-- ====== MAIN DASHBOARD JAVASCRIPT ====== -->
+  <!-- ====================================================================== -->
+  <script>
+  (function () {
+    'use strict';
+
+    // ===== CONFIGURATION =====
+    const BASE_URL = window.location.origin;
+    let ws = null;
+    let tenantId = '';
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_DELAY = 30000;
+    let reconnectTimer = null;
+
+    // ===== DATA STORES =====
+    const conversations = new Map();   // id -> conversation object
+    const completedConversations = [];
+    const agents = new Map();          // id -> agent object
+    let queueStats = {};
+    let campaignData = {};
+    let campaignList = [];
+    let selectedConvId = null;
+    let selectedConvMessages = [];
+    let messagePollTimer = null;
+
+    // Duration update interval
+    let durationInterval = null;
+
+    // Event feed
+    let eventFeedItems = [];
+    const MAX_EVENTS = 100;
+
+
+    // ===== UTILITY FUNCTIONS =====
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(String(str)));
+      return div.innerHTML;
+    }
+
+    function formatDuration(seconds) {
+      if (!seconds && seconds !== 0) return '--:--';
+      const m = Math.floor(seconds / 60);
+      const s = Math.floor(seconds % 60);
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function formatTime(isoString) {
+      if (!isoString) return '--:--:--';
+      const d = new Date(isoString);
+      return d.toLocaleTimeString('en-US', { hour12: false });
+    }
+
+    function timeSince(isoString) {
+      if (!isoString) return 0;
+      return Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+    }
+
+    function apiHeaders() {
+      return { 'X-Tenant-Id': tenantId, 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'Content-Type': 'application/json' };
+    }
+
+
+    // ===== CHANNEL & STATE STYLES =====
+
+    function channelIcon(channel) {
+      const icons = {
+        voice: '<svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>',
+        whatsapp: '<svg class="w-4 h-4 text-green-500" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.625.846 5.059 2.284 7.034L.789 23.492a.5.5 0 00.612.638l4.702-1.362A11.944 11.944 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-2.24 0-4.326-.672-6.064-1.828l-.424-.287-2.776.804.729-2.662-.316-.466A9.957 9.957 0 012 12C2 6.486 6.486 2 12 2s10 4.486 10 10-4.486 10-10 10z"/></svg>',
+        email: '<svg class="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>',
+        sms: '<svg class="w-4 h-4 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>',
+      };
+      return icons[channel] || icons.voice;
+    }
+
+    function channelLabel(channel) {
+      const labels = { voice: 'Voice', whatsapp: 'WhatsApp', email: 'Email', sms: 'SMS' };
+      return labels[channel] || 'Voice';
+    }
+
+    function directionIcon(dir) {
+      if (dir === 'inbound') {
+        return '<svg class="w-3.5 h-3.5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>';
+      }
+      return '<svg class="w-3.5 h-3.5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>';
+    }
+
+    const STATE_STYLES = {
+      human_handling: { bg: 'bg-green-50', text: 'text-green-700', border: 'border-green-200', label: 'Connected' },
+      ai_handling:    { bg: 'bg-violet-50', text: 'text-violet-700', border: 'border-violet-200', label: 'AI Handling' },
+      ivr:            { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', label: 'IVR' },
+      queued:         { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200', label: 'Queued' },
+      failed:         { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', label: 'Failed' },
+      incoming:       { bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200', label: 'Incoming' },
+      completed:      { bg: 'bg-gray-50', text: 'text-gray-500', border: 'border-gray-200', label: 'Completed' },
+      wrap_up:        { bg: 'bg-yellow-50', text: 'text-yellow-700', border: 'border-yellow-200', label: 'Wrap Up' },
+    };
+
+    const AGENT_STATUS_STYLES = {
+      available: { dot: 'bg-green-500', label: 'Available' },
+      on_call:   { dot: 'bg-red-500', label: 'On Call' },
+      in_wrap:   { dot: 'bg-yellow-500', label: 'Wrapping Up' },
+      offline:   { dot: 'bg-gray-400', label: 'Offline' },
+      busy:      { dot: 'bg-red-500', label: 'Busy' },
+    };
+
+    const EVENT_TYPE_STYLES = {
+      'ivr_to_ai':          { color: 'text-violet-700', bg: 'bg-violet-50', label: 'IVR \u2192 AI' },
+      'ai_to_human':        { color: 'text-green-700', bg: 'bg-green-50', label: 'AI \u2192 Human' },
+      'ivr_to_human':       { color: 'text-green-700', bg: 'bg-green-50', label: 'IVR \u2192 Human' },
+      'transfer':           { color: 'text-cyan-700', bg: 'bg-cyan-50', label: 'Transfer' },
+      'escalation':         { color: 'text-amber-700', bg: 'bg-amber-50', label: 'Escalation' },
+      'queue_enter':        { color: 'text-orange-700', bg: 'bg-orange-50', label: 'Queued' },
+      'queue_exit':         { color: 'text-sky-700', bg: 'bg-sky-50', label: 'Dequeued' },
+      'conversation_start': { color: 'text-blue-700', bg: 'bg-blue-50', label: 'Started' },
+      'conversation_end':   { color: 'text-gray-600', bg: 'bg-gray-100', label: 'Ended' },
+      'default':            { color: 'text-gray-600', bg: 'bg-gray-50', label: 'Event' },
+    };
+
+
+    // ===== CLOCK =====
+    function updateClock() {
+      document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+
+    // ===== TOAST NOTIFICATIONS =====
+    function showToast(message, type) {
+      // type: success, error, info, warning
+      const colors = {
+        success: 'bg-green-50 border-green-200 text-green-800',
+        error: 'bg-red-50 border-red-200 text-red-800',
+        info: 'bg-blue-50 border-blue-200 text-blue-800',
+        warning: 'bg-amber-50 border-amber-200 text-amber-800',
+      };
+      const icons = {
+        success: '<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+        info: '<svg class="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+        warning: '<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>',
+      };
+
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = `toast flex items-center gap-3 px-4 py-3 rounded-xl border shadow-lg animate-toastIn text-sm font-medium ${colors[type] || colors.info}`;
+      toast.innerHTML = `${icons[type] || icons.info}<span>${escapeHtml(message)}</span>`;
+      container.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.remove('animate-toastIn');
+        toast.classList.add('animate-toastOut');
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
+
+
+    // ===== CONNECTION STATUS =====
+    function setConnectionStatus(status) {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      dot.className = 'status-dot ' + status;
+      const labels = { connected: 'Connected', disconnected: 'Disconnected', reconnecting: 'Reconnecting...' };
+      text.textContent = labels[status] || status;
+    }
+
+
+    // ===== TAB SWITCHING =====
+    window.switchTab = function(tab) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+      });
+      document.getElementById('convListActive').classList.toggle('hidden', tab !== 'active');
+      document.getElementById('convListQueued').classList.toggle('hidden', tab !== 'queued');
+      document.getElementById('convListCompleted').classList.toggle('hidden', tab !== 'completed');
+    };
+
+
+    // ===== RENDER: CONVERSATION LIST =====
+    function renderConversations() {
+      const arr = Array.from(conversations.values());
+      const activeList = arr.filter(c => c.state !== 'queued');
+      const queuedList = arr.filter(c => c.state === 'queued');
+
+      document.getElementById('tabActiveCount').textContent = `(${activeList.length})`;
+      document.getElementById('tabQueuedCount').textContent = `(${queuedList.length})`;
+      document.getElementById('metricActiveCalls').textContent = arr.length;
+
+      // Count available agents
+      const availAgents = Array.from(agents.values()).filter(a => a.status === 'available').length;
+      document.getElementById('metricAgentsAvail').textContent = availAgents;
+      document.getElementById('metricAgentsAvailSub').textContent = `of ${agents.size} online`;
+
+      // Active list
+      const activeDiv = document.getElementById('convListActive');
+      if (activeList.length === 0) {
+        activeDiv.innerHTML = '<div class="px-4 py-10 text-center text-gray-400 text-sm">No active conversations.</div>';
+      } else {
+        activeDiv.innerHTML = activeList.map(c => renderConvCard(c)).join('');
+      }
+
+      // Queued list
+      const queuedDiv = document.getElementById('convListQueued');
+      if (queuedList.length === 0) {
+        queuedDiv.innerHTML = '<div class="px-4 py-10 text-center text-gray-400 text-sm">No conversations in queue.</div>';
+      } else {
+        queuedDiv.innerHTML = queuedList.map(c => renderConvCard(c)).join('');
+      }
+    }
+
+    function renderConvCard(c) {
+      const st = STATE_STYLES[c.state] || STATE_STYLES.incoming;
+      const customer = c.customer_name || c.customer_identifier || c.customer_phone || c.customer_email || (c.id ? c.id.slice(0, 8) : '--');
+      const handler = c.current_handler || c.assigned_agent_name || '--';
+      const channel = c.channel || 'voice';
+      const dir = c.direction || 'inbound';
+      const startedAt = c.started_at || c.created_at;
+      const duration = timeSince(startedAt);
+      const isSelected = selectedConvId === (c.id || c.conversation_id);
+
+      return `
+        <div class="conv-card px-4 py-3 ${isSelected ? 'selected' : ''}" data-conv-id="${c.id || c.conversation_id}" onclick="selectConversation('${c.id || c.conversation_id}')">
+          <div class="flex items-center justify-between gap-2 mb-1.5">
+            <div class="flex items-center gap-2 min-w-0">
+              ${channelIcon(channel)}
+              <span class="font-medium text-gray-900 text-sm truncate">${escapeHtml(customer)}</span>
+              <span class="flex-shrink-0">${directionIcon(dir)}</span>
+            </div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${st.bg} ${st.text} border ${st.border} flex-shrink-0">
+              ${st.label}
+            </span>
+          </div>
+          <div class="flex items-center justify-between text-xs text-gray-400">
+            <span>Handler: <span class="text-gray-600">${escapeHtml(handler)}</span></span>
+            <span class="font-mono tabular-nums" data-started="${startedAt || ''}">${formatDuration(duration)}</span>
+          </div>
+        </div>`;
+    }
+
+
+    // ===== CONVERSATION SELECTION =====
+    window.selectConversation = function(id) {
+      selectedConvId = id;
+      renderConversations(); // re-render to highlight selected
+
+      document.getElementById('convDetailEmpty').classList.add('hidden');
+      document.getElementById('convDetailView').classList.remove('hidden');
+
+      const conv = conversations.get(id);
+      if (conv) {
+        updateConvDetailHeader(conv);
+      }
+
+      // Fetch messages
+      fetchConversationMessages(id);
+
+      // Start polling for new messages
+      if (messagePollTimer) clearInterval(messagePollTimer);
+      messagePollTimer = setInterval(() => {
+        if (selectedConvId) fetchConversationMessages(selectedConvId);
+      }, 3000);
+    };
+
+    function updateConvDetailHeader(conv) {
+      const customer = conv.customer_name || conv.customer_identifier || conv.customer_phone || conv.customer_email || '--';
+      const channel = conv.channel || 'voice';
+      const phone = conv.customer_phone || conv.customer_identifier || '--';
+      const st = STATE_STYLES[conv.state] || STATE_STYLES.incoming;
+
+      document.getElementById('convDetailAvatar').textContent = customer.charAt(0).toUpperCase();
+      document.getElementById('convDetailName').textContent = customer;
+      document.getElementById('convDetailChannel').textContent = channelLabel(channel);
+      document.getElementById('convDetailNumber').textContent = phone;
+
+      const badge = document.getElementById('convDetailStateBadge');
+      badge.className = `inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${st.bg} ${st.text} border ${st.border}`;
+      badge.textContent = st.label;
+
+      // Enable/disable message input based on channel
+      const msgInput = document.getElementById('msgInput');
+      if (channel === 'voice') {
+        msgInput.placeholder = 'Voice channel - use softphone to communicate';
+        msgInput.disabled = true;
+      } else {
+        msgInput.placeholder = `Type a message via ${channelLabel(channel)}...`;
+        msgInput.disabled = false;
+      }
+    }
+
+    async function fetchConversationMessages(id) {
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/conversations/${encodeURIComponent(id)}/messages`, { headers: apiHeaders() });
+        if (!res.ok) throw new Error('Failed to fetch messages');
+        const data = await res.json();
+        const messages = Array.isArray(data) ? data : (data.messages || data.data || []);
+        selectedConvMessages = messages;
+        renderMessages(messages);
+      } catch (err) {
+        console.warn('[Messages] Fetch error:', err);
+      }
+    }
+
+    function renderMessages(messages) {
+      const container = document.getElementById('convMessages');
+      if (!messages || messages.length === 0) {
+        container.innerHTML = '<div class="text-center text-gray-400 text-sm py-8">No messages yet.</div>';
+        return;
+      }
+
+      container.innerHTML = messages.map(msg => {
+        const role = (msg.role || msg.sender || msg.from || 'system').toLowerCase();
+        const content = msg.content || msg.text || msg.body || '';
+        const time = formatTime(msg.timestamp || msg.created_at);
+
+        if (role === 'system' || role === 'notification') {
+          return `<div class="msg-system px-3 py-2 text-gray-500"><span class="text-gray-400 text-[10px] mr-2">${time}</span>${escapeHtml(content)}</div>`;
+        }
+
+        const isAgent = role === 'agent' || role === 'human';
+        const isAI = role === 'ai' || role === 'bot' || role === 'assistant';
+        const alignClass = isAgent ? 'items-end' : 'items-start';
+        const bubbleClass = isAgent ? 'msg-agent' : (isAI ? 'msg-ai' : 'msg-customer');
+        const nameLabel = isAgent ? 'Agent' : (isAI ? 'AI' : 'Customer');
+        const nameColor = isAgent ? 'text-brand-600' : (isAI ? 'text-violet-600' : 'text-gray-700');
+
+        return `
+          <div class="flex flex-col ${alignClass} animate-fadeIn">
+            <div class="flex items-center gap-1.5 mb-0.5">
+              <span class="text-[10px] font-semibold ${nameColor}">${nameLabel}</span>
+              <span class="text-[10px] text-gray-400">${time}</span>
+            </div>
+            <div class="${bubbleClass} px-3 py-2 text-sm text-gray-800 max-w-[85%]">${escapeHtml(content)}</div>
+          </div>`;
+      }).join('');
+
+      // Auto-scroll to bottom
+      container.scrollTop = container.scrollHeight;
+    }
+
+
+    // ===== SEND MESSAGE =====
+    window.sendMessage = async function() {
+      if (!selectedConvId) return;
+      const input = document.getElementById('msgInput');
+      const content = input.value.trim();
+      if (!content) return;
+
+      const conv = conversations.get(selectedConvId);
+      const channel = conv ? (conv.channel || 'voice') : 'voice';
+
+      if (channel === 'voice') {
+        showToast('Cannot send text messages on voice channel', 'warning');
+        return;
+      }
+
+      input.value = '';
+
+      try {
+        let endpoint, body;
+        if (channel === 'whatsapp') {
+          endpoint = `${BASE_URL}/api/v1/channels/whatsapp/send`;
+          body = { conversation_id: selectedConvId, content };
+        } else if (channel === 'email') {
+          endpoint = `${BASE_URL}/api/v1/channels/email/send`;
+          body = { conversation_id: selectedConvId, body_html: content };
+        } else if (channel === 'sms') {
+          endpoint = `${BASE_URL}/api/v1/channels/sms/send`;
+          body = { conversation_id: selectedConvId, content };
+        } else {
+          // fallback to generic message endpoint
+          endpoint = `${BASE_URL}/api/v1/conversations/${encodeURIComponent(selectedConvId)}/messages`;
+          body = { content, role: 'agent' };
+        }
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: apiHeaders(),
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) throw new Error('Failed to send message');
+        showToast('Message sent', 'success');
+        // Refresh messages
+        fetchConversationMessages(selectedConvId);
+      } catch (err) {
+        showToast('Failed to send message: ' + err.message, 'error');
+      }
+    };
+
+
+    // ===== CONVERSATION ACTIONS =====
+
+    // Hold / Unhold
+    window.doHoldUnhold = async function() {
+      if (!selectedConvId) return;
+      const conv = conversations.get(selectedConvId);
+      const isOnHold = conv && conv._onHold;
+      const endpoint = isOnHold ? 'unhold' : 'hold';
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/calls/${encodeURIComponent(selectedConvId)}/${endpoint}`, {
+          method: 'POST', headers: apiHeaders(),
+        });
+        if (!res.ok) throw new Error(`Failed to ${endpoint}`);
+        if (conv) conv._onHold = !isOnHold;
+
+        const btn = document.getElementById('btnHold');
+        btn.textContent = isOnHold ? 'Hold' : 'Unhold';
+        showToast(isOnHold ? 'Call resumed' : 'Call on hold', 'info');
+      } catch (err) {
+        showToast('Hold/Unhold failed: ' + err.message, 'error');
+      }
+    };
+
+    // Transfer
+    window.openTransferModal = function() {
+      // Populate agent dropdown
+      const select = document.getElementById('transferTarget');
+      select.innerHTML = '<option value="">Select agent...</option>';
+      agents.forEach((agent, id) => {
+        if (agent.status === 'available') {
+          const name = agent.name || agent.agent_name || `Agent ${id.slice(0, 6)}`;
+          select.innerHTML += `<option value="${id}">${escapeHtml(name)}</option>`;
+        }
+      });
+      document.getElementById('transferModal').classList.remove('hidden');
+    };
+
+    window.closeTransferModal = function() {
+      document.getElementById('transferModal').classList.add('hidden');
+    };
+
+    window.submitTransfer = async function() {
+      if (!selectedConvId) return;
+      const targetId = document.getElementById('transferTarget').value;
+      const warm = document.getElementById('transferWarm').checked;
+      if (!targetId) {
+        showToast('Please select a target agent', 'warning');
+        return;
+      }
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/handoffs/transfer`, {
+          method: 'POST', headers: apiHeaders(),
+          body: JSON.stringify({ conversation_id: selectedConvId, target_agent_id: targetId, warm }),
+        });
+        if (!res.ok) throw new Error('Transfer failed');
+        showToast('Transfer initiated', 'success');
+        closeTransferModal();
+      } catch (err) {
+        showToast('Transfer failed: ' + err.message, 'error');
+      }
+    };
+
+    // Escalate
+    window.doEscalate = async function() {
+      if (!selectedConvId) return;
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/handoffs/escalate`, {
+          method: 'POST', headers: apiHeaders(),
+          body: JSON.stringify({ conversation_id: selectedConvId, reason: 'Agent escalation' }),
+        });
+        if (!res.ok) throw new Error('Escalation failed');
+        showToast('Escalation submitted', 'success');
+      } catch (err) {
+        showToast('Escalation failed: ' + err.message, 'error');
+      }
+    };
+
+    // End Call
+    window.doEndCall = async function() {
+      if (!selectedConvId) return;
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/calls/${encodeURIComponent(selectedConvId)}/end`, {
+          method: 'POST', headers: apiHeaders(),
+        });
+        if (!res.ok) throw new Error('End call failed');
+        showToast('Call ended', 'info');
+      } catch (err) {
+        showToast('End call failed: ' + err.message, 'error');
+      }
+    };
+
+    // Disposition
+    window.openDispositionModal = function() {
+      document.getElementById('dispositionType').value = '';
+      document.getElementById('dispositionNotes').value = '';
+      document.getElementById('dispositionModal').classList.remove('hidden');
+    };
+
+    window.closeDispositionModal = function() {
+      document.getElementById('dispositionModal').classList.add('hidden');
+    };
+
+    window.submitDisposition = async function() {
+      if (!selectedConvId) return;
+      const disposition = document.getElementById('dispositionType').value;
+      const notes = document.getElementById('dispositionNotes').value.trim();
+      if (!disposition) {
+        showToast('Please select a disposition', 'warning');
+        return;
+      }
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/conversations/${encodeURIComponent(selectedConvId)}/disposition`, {
+          method: 'POST', headers: apiHeaders(),
+          body: JSON.stringify({ disposition, notes }),
+        });
+        if (!res.ok) throw new Error('Disposition failed');
+        showToast('Disposition submitted', 'success');
+        closeDispositionModal();
+      } catch (err) {
+        showToast('Disposition failed: ' + err.message, 'error');
+      }
+    };
+
+
+    // ===== OUTBOUND DIALER =====
+    window.dialOutbound = async function() {
+      const number = document.getElementById('dialerNumber').value.trim();
+      const name = document.getElementById('dialerName').value.trim();
+      if (!number) {
+        document.getElementById('dialerNumber').focus();
+        return;
+      }
+      if (!tenantId) {
+        showToast('Please connect to a tenant first', 'warning');
+        return;
+      }
+
+      try {
+        const body = { to_number: number };
+        if (name) body.customer_name = name;
+
+        const res = await fetch(`${BASE_URL}/api/v1/calls/outbound`, {
+          method: 'POST', headers: apiHeaders(),
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error('Dial failed');
+        const data = await res.json();
+        showToast(`Call initiated to ${number}`, 'success');
+        document.getElementById('dialerNumber').value = '';
+        document.getElementById('dialerName').value = '';
+      } catch (err) {
+        showToast('Dial failed: ' + err.message, 'error');
+      }
+    };
+
+
+    // ===== CAMPAIGN =====
+    async function fetchCampaigns() {
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/campaigns`, { headers: apiHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        campaignList = Array.isArray(data) ? data : (data.campaigns || data.data || []);
+        renderCampaignDropdown();
+        if (campaignList.length > 0) {
+          campaignData = campaignList[0];
+          renderCampaignPanel();
+        }
+      } catch (err) {
+        console.warn('[Campaigns] Fetch error:', err);
+      }
+    }
+
+    function renderCampaignDropdown() {
+      const select = document.getElementById('campaignSelect');
+      select.innerHTML = '<option value="">Select campaign...</option>';
+      campaignList.forEach(c => {
+        select.innerHTML += `<option value="${c.id || c.campaign_id}">${escapeHtml(c.name || c.campaign_name || 'Campaign')}</option>`;
+      });
+      select.onchange = function() {
+        const id = this.value;
+        const campaign = campaignList.find(c => (c.id || c.campaign_id) === id);
+        if (campaign) {
+          campaignData = campaign;
+          renderCampaignPanel();
+        }
+      };
+      if (campaignList.length > 0) {
+        select.value = campaignList[0].id || campaignList[0].campaign_id || '';
+      }
+    }
+
+    function renderCampaignPanel() {
+      const div = document.getElementById('campaignPanel');
+      if (!campaignData || !campaignData.name) {
+        div.innerHTML = '<div class="text-center text-gray-400 text-sm py-4">No active campaigns.</div>';
+        document.getElementById('metricCampaignPct').textContent = '--%';
+        document.getElementById('metricCampaignSub').textContent = 'no campaign';
+        return;
+      }
+
+      const c = campaignData;
+      const total = c.total_leads || c.total || 0;
+      const completed = c.completed || c.dialed || 0;
+      const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+      document.getElementById('metricCampaignPct').textContent = `${pct}%`;
+      document.getElementById('metricCampaignSub').textContent = `${completed}/${total} leads`;
+
+      div.innerHTML = `
+        <div class="space-y-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-semibold text-gray-900">${escapeHtml(c.name)}</span>
+            <span class="text-xs font-bold text-brand-600">${pct}%</span>
+          </div>
+          <div class="bg-gray-100 rounded-full h-2.5 overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-brand-500 to-violet-500 rounded-full transition-all duration-700" style="width:${pct}%"></div>
+          </div>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div class="text-lg font-bold text-gray-900 tabular-nums">${total}</div>
+              <div class="text-xs text-gray-400">Total</div>
+            </div>
+            <div>
+              <div class="text-lg font-bold text-green-600 tabular-nums">${completed}</div>
+              <div class="text-xs text-gray-400">Done</div>
+            </div>
+            <div>
+              <div class="text-lg font-bold text-amber-600 tabular-nums">${total - completed}</div>
+              <div class="text-xs text-gray-400">Remaining</div>
+            </div>
+          </div>
+          <button onclick="dialNextLead()" class="w-full mt-2 bg-violet-600 hover:bg-violet-700 text-white py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm flex items-center justify-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+            Dial Next Lead
+          </button>
+        </div>`;
+    }
+
+    window.dialNextLead = async function() {
+      if (!campaignData) return;
+      const campId = campaignData.id || campaignData.campaign_id;
+      if (!campId) {
+        showToast('No campaign selected', 'warning');
+        return;
+      }
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/calls/outbound/campaign`, {
+          method: 'POST', headers: apiHeaders(),
+          body: JSON.stringify({ campaign_id: campId }),
+        });
+        if (!res.ok) throw new Error('Campaign dial failed');
+        const data = await res.json();
+        const leadName = data.lead_name || data.customer_name || '';
+        const leadNumber = data.to_number || data.phone || '';
+        showToast(`Dialing ${leadName || leadNumber || 'next lead'}`, 'success');
+      } catch (err) {
+        showToast('Campaign dial failed: ' + err.message, 'error');
+      }
+    };
+
+
+    // ===== RENDER: AGENT GRID =====
+    function renderAgents() {
+      const grid = document.getElementById('agentGrid');
+      const arr = Array.from(agents.values());
+      document.getElementById('agentCount').textContent = `(${arr.length})`;
+
+      const availCount = arr.filter(a => a.status === 'available').length;
+      document.getElementById('metricAgentsAvail').textContent = availCount;
+      document.getElementById('metricAgentsAvailSub').textContent = `of ${arr.length} online`;
+
+      if (arr.length === 0) {
+        grid.innerHTML = '<div class="text-center text-gray-400 text-sm py-6 col-span-full">No agents loaded.</div>';
+        return;
+      }
+
+      grid.innerHTML = arr.map(a => {
+        const st = AGENT_STATUS_STYLES[a.status] || AGENT_STATUS_STYLES.offline;
+        const name = a.name || a.agent_name || `Agent ${(a.id || '').slice(0, 6)}`;
+        const convCount = a.active_conversations || a.conversation_count || 0;
+        const id = a.id || a.agent_id;
+
+        return `
+          <div class="bg-gray-50 border border-gray-100 rounded-lg p-3 flex items-center gap-3 hover:bg-gray-100 transition-colors cursor-pointer animate-fadeIn" data-agent-id="${id}" onclick="toggleAgentStatus('${id}')">
+            <div class="relative flex-shrink-0">
+              <div class="w-9 h-9 rounded-full bg-white border border-gray-200 flex items-center justify-center text-sm font-bold text-gray-600">
+                ${name.charAt(0).toUpperCase()}
+              </div>
+              <span class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-50 ${st.dot}"></span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-medium text-gray-900 truncate">${escapeHtml(name)}</div>
+              <div class="text-xs text-gray-400">${st.label} &middot; ${convCount} conv${convCount !== 1 ? 's' : ''}</div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    window.toggleAgentStatus = async function(agentId) {
+      const agent = agents.get(agentId);
+      if (!agent) return;
+      const newStatus = agent.status === 'available' ? 'offline' : 'available';
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/v1/agents/${encodeURIComponent(agentId)}/status`, {
+          method: 'PATCH', headers: apiHeaders(),
+          body: JSON.stringify({ status: newStatus }),
+        });
+        if (!res.ok) throw new Error('Status update failed');
+        agent.status = newStatus;
+        agents.set(agentId, agent);
+        renderAgents();
+        showToast(`Agent set to ${newStatus}`, 'info');
+      } catch (err) {
+        showToast('Agent status update failed: ' + err.message, 'error');
+      }
+    };
+
+
+    // ===== RENDER: EVENT FEED =====
+    function addEventToFeed(event) {
+      eventFeedItems.unshift(event);
+      if (eventFeedItems.length > MAX_EVENTS) eventFeedItems.pop();
+      renderEventFeed();
+    }
+
+    function renderEventFeed() {
+      const feed = document.getElementById('eventFeed');
+      if (eventFeedItems.length === 0) {
+        feed.innerHTML = '<div class="px-4 py-8 text-center text-gray-400 text-sm font-sans">Waiting for events...</div>';
+        return;
+      }
+
+      feed.innerHTML = eventFeedItems.map((ev, i) => {
+        const evType = ev.event_type || ev.type || 'default';
+        const st = EVENT_TYPE_STYLES[evType] || EVENT_TYPE_STYLES.default;
+        const ts = formatTime(ev.timestamp || ev.created_at || new Date().toISOString());
+        const from = ev.from_handler || ev.from_state || '--';
+        const to = ev.to_handler || ev.to_state || '--';
+        const reason = ev.reason || ev.escalation_reason || '';
+        const convId = ev.conversation_id ? ev.conversation_id.slice(0, 8) : '';
+
+        return `
+          <div class="px-4 py-2.5 flex items-start gap-3 ${i === 0 ? 'animate-fadeSlideIn' : ''} hover:bg-gray-50 transition-colors">
+            <span class="text-gray-400 tabular-nums flex-shrink-0 pt-0.5">${ts}</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${st.bg} ${st.color} flex-shrink-0">
+              ${st.label}
+            </span>
+            <span class="text-gray-600 flex-1 min-w-0">
+              <span class="text-gray-500">${escapeHtml(from)}</span>
+              <span class="text-gray-300 mx-1">&rarr;</span>
+              <span class="text-gray-900 font-medium">${escapeHtml(to)}</span>
+              ${reason ? `<span class="ml-2 text-gray-400">&mdash; ${escapeHtml(reason)}</span>` : ''}
+            </span>
+            <span class="text-gray-300 flex-shrink-0 font-mono">${convId}</span>
+          </div>`;
+      }).join('');
+    }
+
+    window.clearEventFeed = function() {
+      eventFeedItems = [];
+      renderEventFeed();
+    };
+
+
+    // ===== RENDER: QUEUE METRICS =====
+    function renderQueueMetrics() {
+      document.getElementById('metricQueueDepth').textContent = queueStats.queue_depth ?? queueStats.total_waiting ?? 0;
+      document.getElementById('metricQueueSub').textContent = 'waiting';
+      document.getElementById('metricAvgWait').textContent = queueStats.avg_wait_time != null
+        ? formatDuration(queueStats.avg_wait_time)
+        : '--';
+    }
+
+
+    // ===== DURATION TIMER =====
+    function startDurationTimer() {
+      if (durationInterval) clearInterval(durationInterval);
+      durationInterval = setInterval(() => {
+        // Update conversation list durations
+        document.querySelectorAll('.conv-card [data-started]').forEach(el => {
+          const started = el.getAttribute('data-started');
+          if (started) {
+            el.textContent = formatDuration(timeSince(started));
+          }
+        });
+        // Update detail view duration
+        if (selectedConvId) {
+          const conv = conversations.get(selectedConvId);
+          if (conv) {
+            const startedAt = conv.started_at || conv.created_at;
+            if (startedAt) {
+              document.getElementById('convDetailDuration').textContent = formatDuration(timeSince(startedAt));
+            }
+          }
+        }
+      }, 1000);
+    }
+
+
+    // ===== REST API: INITIAL DATA LOAD =====
+    async function fetchInitialData() {
+      const [convRes, agentRes, queueRes] = await Promise.allSettled([
+        fetch(`${BASE_URL}/api/v1/conversations/active`, { headers: apiHeaders() }),
+        fetch(`${BASE_URL}/api/v1/agents`, { headers: apiHeaders() }),
+        fetch(`${BASE_URL}/api/v1/handoffs/queue/stats`, { headers: apiHeaders() }),
+      ]);
+
+      // Conversations
+      if (convRes.status === 'fulfilled' && convRes.value.ok) {
+        const data = await convRes.value.json();
+        const list = Array.isArray(data) ? data : (data.conversations || data.data || []);
+        conversations.clear();
+        list.forEach(c => conversations.set(c.id || c.conversation_id, c));
+        renderConversations();
+      }
+
+      // Agents
+      if (agentRes.status === 'fulfilled' && agentRes.value.ok) {
+        const data = await agentRes.value.json();
+        const list = Array.isArray(data) ? data : (data.agents || data.data || []);
+        agents.clear();
+        list.forEach(a => agents.set(a.id || a.agent_id, a));
+        renderAgents();
+      }
+
+      // Queue stats
+      if (queueRes.status === 'fulfilled' && queueRes.value.ok) {
+        queueStats = await queueRes.value.json();
+        renderQueueMetrics();
+      }
+
+      // Also fetch campaigns
+      fetchCampaigns();
+    }
+
+
+    // ===== WEBSOCKET =====
+    function connectWebSocket() {
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsUrl = `${wsProtocol}://${window.location.host}/api/v1/ws/dashboard?tenant_id=${encodeURIComponent(tenantId)}`;
+
+      setConnectionStatus('reconnecting');
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = function() {
+        reconnectAttempts = 0;
+        setConnectionStatus('connected');
+        showToast('Connected to dashboard', 'success');
+        console.log('[WS] Connected to', wsUrl);
+        fetchInitialData();
+      };
+
+      ws.onmessage = function(event) {
+        try {
+          const msg = JSON.parse(event.data);
+          handleMessage(msg);
+        } catch (e) {
+          console.warn('[WS] Failed to parse message:', e);
+        }
+      };
+
+      ws.onclose = function(event) {
+        setConnectionStatus('disconnected');
+        console.log('[WS] Disconnected:', event.code, event.reason);
+        scheduleReconnect();
+      };
+
+      ws.onerror = function(err) {
+        console.error('[WS] Error:', err);
+      };
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+      reconnectAttempts++;
+      console.log(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
+      setConnectionStatus('reconnecting');
+      reconnectTimer = setTimeout(() => {
+        if (tenantId) connectWebSocket();
+      }, delay);
+    }
+
+
+    // ===== WEBSOCKET MESSAGE HANDLER =====
+    function handleMessage(msg) {
+      const type = msg.type || msg.event || msg.event_type || '';
+
+      switch (type) {
+        case 'conversation.state_changed':
+          handleConversationUpdate(msg.data || msg.conversation || msg);
+          break;
+
+        case 'conversation.handoff.ivr_to_ai':
+        case 'conversation.handoff.ai_to_human':
+        case 'conversation.handoff.ivr_to_human':
+        case 'conversation.handoff.transfer':
+        case 'conversation.handoff.escalation':
+        case 'conversation.handoff.queue_enter':
+        case 'conversation.handoff.queue_exit':
+          handleHandoffEvent(msg);
+          break;
+
+        case 'conversation.started':
+        case 'conversation.created':
+          handleConversationUpdate(msg.data || msg.conversation || msg);
+          showToast('New conversation started', 'info');
+          addEventToFeed({
+            event_type: 'conversation_start',
+            timestamp: msg.timestamp || new Date().toISOString(),
+            from_handler: '--',
+            to_handler: (msg.data || msg).current_handler || 'IVR',
+            conversation_id: (msg.data || msg).id || (msg.data || msg).conversation_id,
+          });
+          break;
+
+        case 'conversation.ended':
+        case 'conversation.completed':
+          handleConversationEnd(msg.data || msg.conversation || msg);
+          showToast('Conversation ended', 'info');
+          addEventToFeed({
+            event_type: 'conversation_end',
+            timestamp: msg.timestamp || new Date().toISOString(),
+            from_handler: (msg.data || msg).current_handler || '--',
+            to_handler: 'Ended',
+            conversation_id: (msg.data || msg).id || (msg.data || msg).conversation_id,
+          });
+          break;
+
+        case 'agent.status_changed':
+          handleAgentUpdate(msg.data || msg.agent || msg);
+          break;
+
+        case 'queue.updated':
+          handleQueueUpdate(msg.data || msg.stats || msg);
+          break;
+
+        case 'campaign.progress':
+          handleCampaignUpdate(msg.data || msg.campaign || msg);
+          break;
+
+        default:
+          if (msg.conversation_id && msg.state) {
+            handleConversationUpdate(msg);
+          } else if (msg.from_handler || msg.to_handler || msg.from_state || msg.to_state) {
+            handleHandoffEvent(msg);
+          }
+          break;
+      }
+    }
+
+    function handleConversationUpdate(data) {
+      const id = data.id || data.conversation_id;
+      if (!id) return;
+
+      const existing = conversations.get(id);
+      const updated = { ...existing, ...data, id };
+      conversations.set(id, updated);
+
+      renderConversations();
+
+      // If this is the selected conversation, update the header
+      if (selectedConvId === id) {
+        updateConvDetailHeader(updated);
+      }
+
+      flashCard(`[data-conv-id="${id}"]`);
+    }
+
+    function handleConversationEnd(data) {
+      const id = data.id || data.conversation_id;
+      if (id) {
+        const conv = conversations.get(id);
+        if (conv) completedConversations.unshift({ ...conv, ...data, state: 'completed' });
+        conversations.delete(id);
+      }
+      renderConversations();
+      renderCompletedConversations();
+
+      if (selectedConvId === id) {
+        selectedConvId = null;
+        if (messagePollTimer) clearInterval(messagePollTimer);
+        document.getElementById('convDetailView').classList.add('hidden');
+        document.getElementById('convDetailEmpty').classList.remove('hidden');
+      }
+    }
+
+    function renderCompletedConversations() {
+      const div = document.getElementById('convListCompleted');
+      if (completedConversations.length === 0) {
+        div.innerHTML = '<div class="px-4 py-10 text-center text-gray-400 text-sm">No completed conversations.</div>';
+        return;
+      }
+      div.innerHTML = completedConversations.slice(0, 50).map(c => {
+        const customer = c.customer_name || c.customer_identifier || c.customer_phone || '--';
+        const channel = c.channel || 'voice';
+        return `
+          <div class="px-4 py-3 text-sm">
+            <div class="flex items-center gap-2">
+              ${channelIcon(channel)}
+              <span class="text-gray-600">${escapeHtml(customer)}</span>
+              <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-500 border border-gray-200">Completed</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function handleHandoffEvent(msg) {
+      const data = msg.data || msg;
+      const evType = msg.type || msg.event_type || '';
+      let shortType = evType.replace('conversation.handoff.', '');
+      if (!EVENT_TYPE_STYLES[shortType]) shortType = 'default';
+
+      // Determine toast message
+      if (shortType === 'ai_to_human') showToast('AI handed off to human agent', 'info');
+      else if (shortType === 'transfer') showToast('Conversation transferred', 'info');
+      else if (shortType === 'escalation') showToast('Conversation escalated', 'warning');
+
+      addEventToFeed({
+        event_type: shortType,
+        timestamp: data.timestamp || msg.timestamp || new Date().toISOString(),
+        from_handler: data.from_handler || data.from_state || '--',
+        to_handler: data.to_handler || data.to_state || '--',
+        reason: data.reason || data.escalation_reason || '',
+        conversation_id: data.conversation_id || data.id || '',
+      });
+
+      // Update the conversation in our data store
+      if (data.conversation_id || data.id) {
+        const convId = data.conversation_id || data.id;
+        const conv = conversations.get(convId);
+        if (conv) {
+          if (data.to_state) conv.state = data.to_state;
+          if (data.to_handler) conv.current_handler = data.to_handler;
+          conversations.set(convId, conv);
+          renderConversations();
+          if (selectedConvId === convId) updateConvDetailHeader(conv);
+        }
+      }
+    }
+
+    function handleAgentUpdate(data) {
+      const id = data.id || data.agent_id;
+      if (!id) return;
+      const existing = agents.get(id);
+      agents.set(id, { ...existing, ...data, id });
+      renderAgents();
+      flashCard(`[data-agent-id="${id}"]`);
+    }
+
+    function handleQueueUpdate(data) {
+      queueStats = { ...queueStats, ...data };
+      renderQueueMetrics();
+      // Flash metric cards
+      document.querySelectorAll('.metric-card').forEach(el => {
+        el.classList.remove('card-updated');
+        void el.offsetWidth;
+        el.classList.add('card-updated');
+      });
+    }
+
+    function handleCampaignUpdate(data) {
+      campaignData = { ...campaignData, ...data };
+      renderCampaignPanel();
+    }
+
+    function flashCard(selector) {
+      const el = document.querySelector(selector);
+      if (!el) return;
+      el.classList.remove('card-updated');
+      void el.offsetWidth;
+      el.classList.add('card-updated');
+    }
+
+
+    // ===== CONNECT BUTTON =====
+    window.connectDashboard = function() {
+      const input = document.getElementById('tenantInput');
+      tenantId = (input.value || '').trim();
+      if (!tenantId) {
+        input.focus();
+        input.classList.add('ring-2', 'ring-red-400');
+        setTimeout(() => input.classList.remove('ring-2', 'ring-red-400'), 1500);
+        return;
+      }
+      // Reset state
+      conversations.clear();
+      agents.clear();
+      queueStats = {};
+      campaignData = {};
+      campaignList = [];
+      eventFeedItems = [];
+      completedConversations.length = 0;
+      reconnectAttempts = 0;
+      selectedConvId = null;
+      if (messagePollTimer) clearInterval(messagePollTimer);
+
+      renderConversations();
+      renderAgents();
+      renderQueueMetrics();
+      renderCampaignPanel();
+      renderEventFeed();
+      renderCompletedConversations();
+
+      document.getElementById('convDetailView').classList.add('hidden');
+      document.getElementById('convDetailEmpty').classList.remove('hidden');
+
+      connectWebSocket();
+      startDurationTimer();
+    };
+
+
+    // ===== INIT =====
+    (function init() {
+      // Check URL params for tenant_id
+      const params = new URLSearchParams(window.location.search);
+      const urlTenant = params.get('tenant_id') || params.get('tenantId');
+      if (urlTenant) {
+        document.getElementById('tenantInput').value = urlTenant;
+        setTimeout(() => window.connectDashboard(), 300);
+      }
+
+      // Enter key on input triggers connect
+      document.getElementById('tenantInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') window.connectDashboard();
+      });
+
+      // Render initial empty state
+      renderConversations();
+      renderAgents();
+      renderQueueMetrics();
+      renderCampaignPanel();
+      renderEventFeed();
+    })();
+
+  })();
+  </script>
+
+
+  <!-- ====================================================================== -->
+  <!-- ====== PLIVO BROWSER SDK ====== -->
+  <!-- ====================================================================== -->
+  <script src="https://cdn.plivo.com/sdk/browser/v2/plivo.min.js"></script>
+
+  <!-- ====== SOFTPHONE PANEL HTML ====== -->
+  <div id="softphonePanel" class="softphone-panel collapsed">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 cursor-pointer select-none hover:bg-gray-50 transition-colors" onclick="window.spTogglePanel()">
+      <div class="flex items-center gap-2 text-sm font-semibold text-gray-800">
+        <div class="w-7 h-7 bg-brand-50 rounded-lg flex items-center justify-center">
+          <svg class="w-4 h-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+        </div>
+        Softphone
+        <span id="spStateBadge" class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-500">Idle</span>
+      </div>
+      <div class="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 transition-transform" id="spToggleChevron" style="transform: rotate(180deg);">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="softphone-body" style="transition: opacity 0.25s ease;">
+
+      <!-- Registration Status -->
+      <div class="px-4 py-2.5 border-b border-gray-50">
+        <div class="flex items-center gap-2 text-xs">
+          <span id="spRegDot" class="w-2 h-2 rounded-full bg-gray-300 flex-shrink-0"></span>
+          <span id="spRegText" class="text-gray-500">Not Registered</span>
+        </div>
+      </div>
+
+      <!-- Login Section -->
+      <div id="spLoginSection" class="px-4 py-3 border-b border-gray-50">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">Agent Login</div>
+        <div class="flex flex-col gap-2">
+          <input id="spUsername" type="text" placeholder="Endpoint username" autocomplete="off"
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+          <input id="spPassword" type="password" placeholder="Password" autocomplete="off"
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+          <button id="spLoginBtn" class="w-full bg-brand-600 hover:bg-brand-700 text-white py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5" onclick="window.spLogin()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+            Login
+          </button>
+        </div>
+      </div>
+
+      <!-- Incoming Call Alert (hidden by default) -->
+      <div id="spIncomingSection" class="sp-hidden px-4 py-3 border-b border-gray-50 sp-incoming-ring" style="background: rgba(34,197,94,0.04);">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-green-600 mb-2">Incoming Call</div>
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+            <span id="spCallerId" class="text-sm font-semibold text-gray-900">Unknown</span>
+          </div>
+          <!-- Escalation context -->
+          <div id="spEscalationContext" class="sp-hidden bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-xs text-gray-500 max-h-[80px] overflow-y-auto">
+            <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Escalation Context</div>
+            <div id="spContextBody" class="text-gray-600"></div>
+          </div>
+          <div class="flex gap-2">
+            <button class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1" onclick="window.spAnswer()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+              Accept
+            </button>
+            <button class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1" onclick="window.spReject()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Reject
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Call Section (hidden by default) -->
+      <div id="spActiveCallSection" class="sp-hidden px-4 py-3 border-b border-gray-50">
+        <div class="text-center mb-3">
+          <div id="spCallTimer" class="font-mono text-2xl font-bold text-gray-900 tabular-nums tracking-wide">00:00</div>
+          <div id="spActiveCallerId" class="text-xs text-gray-400 mt-0.5">--</div>
+        </div>
+        <!-- Escalation context during active call -->
+        <div id="spActiveEscalationContext" class="sp-hidden bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-xs text-gray-500 max-h-[80px] overflow-y-auto mb-3">
+          <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Escalation Context</div>
+          <div id="spActiveContextBody" class="text-gray-600"></div>
+        </div>
+        <div class="flex items-center justify-center gap-2 flex-wrap">
+          <button id="spMuteBtn" class="w-11 h-11 flex items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 transition-colors" onclick="window.spToggleMute()" title="Mute">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+          <button id="spHoldBtn" class="w-11 h-11 flex items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 transition-colors" onclick="window.spToggleHold()" title="Hold">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          </button>
+          <button id="spTransferBtn" class="w-11 h-11 flex items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-500 hover:bg-gray-100 transition-colors" onclick="window.spStartTransfer()" title="Transfer">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 014-4h12"/></svg>
+          </button>
+          <button class="w-11 h-11 flex items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-500 hover:bg-red-600 hover:text-white transition-colors" onclick="window.spEndCall()" title="End Call">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 003.41 2.6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.11 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Transfer Input (hidden by default) -->
+      <div id="spTransferSection" class="sp-hidden px-4 py-3 border-b border-gray-50">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">Transfer To</div>
+        <div class="flex gap-2">
+          <input id="spTransferNumber" type="tel" placeholder="Number or extension"
+            class="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+          <button class="bg-brand-600 hover:bg-brand-700 text-white px-3 py-2 rounded-lg transition-colors" onclick="window.spDoTransfer()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 014-4h12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Dialer Section (visible when registered and no active call) -->
+      <div id="spDialerSection" class="sp-hidden px-4 py-3 border-b border-gray-50">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">Outbound Dialer</div>
+        <div class="flex gap-2">
+          <input id="spDialNumber" type="tel" placeholder="+1234567890"
+            class="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent" />
+          <button id="spDialBtn" class="bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold" onclick="window.spDial()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+            Dial
+          </button>
+        </div>
+      </div>
+
+      <!-- Phone Forward Toggle -->
+      <div id="spForwardSection" class="sp-hidden px-4 py-3 border-b border-gray-50">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">Call Routing</div>
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-xs text-gray-500">Browser</span>
+          <div id="spForwardToggle" class="relative w-9 h-5 rounded-full bg-gray-200 cursor-pointer transition-colors" onclick="window.spToggleForward()">
+            <div class="sp-toggle-thumb absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"></div>
+          </div>
+          <span class="text-xs text-gray-500">Forward to phone</span>
+        </div>
+        <div id="spForwardNumberRow" class="sp-hidden mt-2">
+          <input id="spForwardNumber" type="tel" placeholder="Forward number +1..."
+            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+        </div>
+      </div>
+
+      <!-- Logout -->
+      <div id="spLogoutSection" class="sp-hidden px-4 py-2.5">
+        <button class="w-full border border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-500 hover:text-gray-700 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5" onclick="window.spLogout()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Logout
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ====================================================================== -->
+  <!-- ====== SOFTPHONE JAVASCRIPT ====== -->
+  <!-- ====================================================================== -->
+  <script>
+  (function () {
+    'use strict';
+
+    // ===== STATE =====
+    const BASE_URL = window.location.origin;
+    let plivoBrowser = null;
+    let spState = 'idle';          // idle | ringing | oncall | onhold
+    let spRegistered = false;
+    let spMuted = false;
+    let spOnHold = false;
+    let spCallTimerInterval = null;
+    let spCallStartTime = null;
+    let spCurrentCallerId = null;
+    let spCurrentConvId = null;
+    let spForwardEnabled = false;
+    let spAgentId = null;
+
+    function getTenantId() {
+      const el = document.getElementById('tenantInput');
+      return el ? el.value.trim() : '';
+    }
+
+    // ===== UI HELPERS =====
+    function $(id) { return document.getElementById(id); }
+
+    function setSpState(state) {
+      spState = state;
+      const badge = $('spStateBadge');
+      const labels = { idle: 'Idle', ringing: 'Ringing', oncall: 'On Call', onhold: 'On Hold' };
+      const colors = {
+        idle: 'bg-gray-100 text-gray-500',
+        ringing: 'bg-amber-50 text-amber-600',
+        oncall: 'bg-green-50 text-green-700',
+        onhold: 'bg-indigo-50 text-indigo-600',
+      };
+      badge.textContent = labels[state] || state;
+      badge.className = `inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${colors[state] || colors.idle}`;
+
+      const isIdle = state === 'idle';
+      const isRinging = state === 'ringing';
+      const isOnCall = state === 'oncall' || state === 'onhold';
+
+      toggleEl('spIncomingSection', isRinging);
+      toggleEl('spActiveCallSection', isOnCall);
+      toggleEl('spDialerSection', isIdle && spRegistered);
+      toggleEl('spForwardSection', isIdle && spRegistered);
+      toggleEl('spLogoutSection', isIdle && spRegistered);
+      toggleEl('spLoginSection', !spRegistered);
+
+      if (isIdle) toggleEl('spTransferSection', false);
+    }
+
+    function toggleEl(id, show) {
+      const el = $(id);
+      if (!el) return;
+      if (show) el.classList.remove('sp-hidden');
+      else el.classList.add('sp-hidden');
+    }
+
+    function setRegStatus(status, text) {
+      const dot = $('spRegDot');
+      const label = $('spRegText');
+      const dotColors = { registered: 'bg-green-500', connecting: 'bg-amber-500', failed: 'bg-red-500', '': 'bg-gray-300' };
+      dot.className = `w-2 h-2 rounded-full flex-shrink-0 ${dotColors[status] || 'bg-gray-300'}`;
+      if (status === 'registered') dot.style.boxShadow = '0 0 6px rgba(34,197,94,0.5)';
+      else dot.style.boxShadow = 'none';
+      label.textContent = text || status;
+    }
+
+    function startCallTimer() {
+      spCallStartTime = Date.now();
+      if (spCallTimerInterval) clearInterval(spCallTimerInterval);
+      spCallTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - spCallStartTime) / 1000);
+        const m = Math.floor(elapsed / 60);
+        const s = elapsed % 60;
+        $('spCallTimer').textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+      }, 1000);
+    }
+
+    function stopCallTimer() {
+      if (spCallTimerInterval) {
+        clearInterval(spCallTimerInterval);
+        spCallTimerInterval = null;
+      }
+      $('spCallTimer').textContent = '00:00';
+    }
+
+
+    // ===== PLIVO INITIALIZATION =====
+    function initPlivo() {
+      if (plivoBrowser) return;
+      try {
+        plivoBrowser = new window.Plivo({
+          debug: 'ALL',
+          permOnClick: true,
+          enableTracking: true,
+          closeProtection: true,
+          audioConstraints: { optional: [{ googAutoGainControl: false }] },
+        });
+      } catch (e) {
+        console.error('[Softphone] Failed to initialize Plivo SDK:', e);
+        setRegStatus('failed', 'SDK Init Failed');
+        return;
+      }
+
+      plivoBrowser.client.on('ready', function() {
+        console.log('[Softphone] Registered with Plivo');
+        spRegistered = true;
+        setRegStatus('registered', 'Registered');
+        setSpState('idle');
+        if (spAgentId) notifyAgentStatus('available');
+      });
+
+      plivoBrowser.client.on('onLoginFailed', function(reason) {
+        console.warn('[Softphone] Login failed:', reason);
+        spRegistered = false;
+        setRegStatus('failed', 'Login Failed');
+        $('spLoginBtn').disabled = false;
+        $('spLoginBtn').innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Login';
+      });
+
+      plivoBrowser.client.on('onIncomingCall', function(callerName, extraHeaders) {
+        console.log('[Softphone] Incoming call from:', callerName, extraHeaders);
+        spCurrentCallerId = callerName || 'Unknown';
+        $('spCallerId').textContent = spCurrentCallerId;
+
+        spCurrentConvId = extraHeaders?.['X-Ph-Conv_id'] || extraHeaders?.['X-PH-conv_id'] || null;
+        if (spCurrentConvId) fetchEscalationContext(spCurrentConvId);
+
+        $('softphonePanel').classList.remove('collapsed');
+        $('spToggleChevron').style.transform = 'rotate(0deg)';
+        setSpState('ringing');
+      });
+
+      plivoBrowser.client.on('onIncomingCallCanceled', function() {
+        console.log('[Softphone] Incoming call canceled');
+        spCurrentCallerId = null;
+        spCurrentConvId = null;
+        hideEscalationContext();
+        setSpState('idle');
+      });
+
+      plivoBrowser.client.on('onCallRemoteRinging', function() {
+        console.log('[Softphone] Remote ringing (outbound)');
+        setSpState('ringing');
+      });
+
+      plivoBrowser.client.on('onCallAnswered', function() {
+        console.log('[Softphone] Call answered');
+        spMuted = false;
+        spOnHold = false;
+        $('spMuteBtn').classList.remove('bg-brand-50', 'border-brand-200', 'text-brand-600');
+        $('spHoldBtn').classList.remove('bg-brand-50', 'border-brand-200', 'text-brand-600');
+        $('spActiveCallerId').textContent = spCurrentCallerId || '--';
+
+        moveContextToActiveCall();
+        startCallTimer();
+        setSpState('oncall');
+
+        if (spCurrentConvId) notifyCallAnswer(spCurrentConvId);
+      });
+
+      plivoBrowser.client.on('onCallTerminated', function() {
+        console.log('[Softphone] Call terminated');
+        const convId = spCurrentConvId;
+        stopCallTimer();
+        spCurrentCallerId = null;
+        spCurrentConvId = null;
+        spMuted = false;
+        spOnHold = false;
+        hideEscalationContext();
+        setSpState('idle');
+
+        if (convId) notifyCallEnd(convId);
+        if (spAgentId) notifyAgentStatus('available');
+      });
+
+      plivoBrowser.client.on('onCallFailed', function(reason) {
+        console.error('[Softphone] Call failed:', reason);
+        stopCallTimer();
+        spCurrentCallerId = null;
+        spCurrentConvId = null;
+        spMuted = false;
+        spOnHold = false;
+        hideEscalationContext();
+        setSpState('idle');
+      });
+
+      plivoBrowser.client.on('onMediaPermission', function(result) {
+        console.log('[Softphone] Media permission:', result ? 'granted' : 'denied');
+        if (!result) setRegStatus('failed', 'Mic Permission Denied');
+      });
+    }
+
+
+    // ===== SOFTPHONE ACTIONS =====
+
+    window.spTogglePanel = function() {
+      const panel = $('softphonePanel');
+      panel.classList.toggle('collapsed');
+      const chevron = $('spToggleChevron');
+      if (panel.classList.contains('collapsed')) {
+        chevron.style.transform = 'rotate(180deg)';
+      } else {
+        chevron.style.transform = 'rotate(0deg)';
+      }
+    };
+
+    window.spLogin = function() {
+      const username = $('spUsername').value.trim();
+      const password = $('spPassword').value.trim();
+      if (!username || !password) {
+        $('spUsername').focus();
+        return;
+      }
+
+      initPlivo();
+      if (!plivoBrowser) return;
+
+      setRegStatus('connecting', 'Connecting...');
+      $('spLoginBtn').disabled = true;
+      $('spLoginBtn').innerHTML = '<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 019.95 9" stroke-opacity="1"/></svg> Connecting...';
+
+      spAgentId = username.split('@')[0];
+      plivoBrowser.client.login(username, password);
+    };
+
+    window.spLogout = function() {
+      if (plivoBrowser && spRegistered) plivoBrowser.client.logout();
+      spRegistered = false;
+      const agentId = spAgentId;
+      spAgentId = null;
+      setRegStatus('', 'Not Registered');
+      setSpState('idle');
+
+      $('spLoginBtn').disabled = false;
+      $('spLoginBtn').innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Login';
+
+      if (agentId) notifyAgentStatus('offline');
+    };
+
+    window.spAnswer = function() {
+      if (!plivoBrowser) return;
+      if (spForwardEnabled) {
+        const fwdNum = $('spForwardNumber').value.trim();
+        if (fwdNum) {
+          plivoBrowser.client.answer();
+          setTimeout(() => {
+            if (plivoBrowser.client.callSession) {
+              plivoBrowser.client.sendDtmf('*1' + fwdNum + '#');
+            }
+          }, 500);
+          return;
+        }
+      }
+      plivoBrowser.client.answer();
+    };
+
+    window.spReject = function() {
+      if (!plivoBrowser) return;
+      plivoBrowser.client.reject();
+      spCurrentCallerId = null;
+      spCurrentConvId = null;
+      hideEscalationContext();
+      setSpState('idle');
+    };
+
+    window.spDial = function() {
+      if (!plivoBrowser || !spRegistered) return;
+      const number = $('spDialNumber').value.trim();
+      if (!number) { $('spDialNumber').focus(); return; }
+
+      spCurrentCallerId = number;
+      const tid = getTenantId();
+      const extraHeaders = {};
+      if (tid) extraHeaders['X-PH-tenant_id'] = tid;
+
+      plivoBrowser.client.call(number, extraHeaders);
+      $('spActiveCallerId').textContent = number;
+    };
+
+    window.spToggleMute = function() {
+      if (!plivoBrowser) return;
+      if (spMuted) {
+        plivoBrowser.client.unmute();
+        spMuted = false;
+        $('spMuteBtn').classList.remove('bg-brand-50', 'border-brand-200', 'text-brand-600');
+        $('spMuteBtn').classList.add('bg-gray-50', 'border-gray-200', 'text-gray-500');
+      } else {
+        plivoBrowser.client.mute();
+        spMuted = true;
+        $('spMuteBtn').classList.remove('bg-gray-50', 'border-gray-200', 'text-gray-500');
+        $('spMuteBtn').classList.add('bg-brand-50', 'border-brand-200', 'text-brand-600');
+      }
+    };
+
+    window.spToggleHold = function() {
+      if (!plivoBrowser) return;
+      if (spOnHold) {
+        plivoBrowser.client.unhold();
+        spOnHold = false;
+        $('spHoldBtn').classList.remove('bg-brand-50', 'border-brand-200', 'text-brand-600');
+        $('spHoldBtn').classList.add('bg-gray-50', 'border-gray-200', 'text-gray-500');
+        setSpState('oncall');
+      } else {
+        plivoBrowser.client.hold();
+        spOnHold = true;
+        $('spHoldBtn').classList.remove('bg-gray-50', 'border-gray-200', 'text-gray-500');
+        $('spHoldBtn').classList.add('bg-brand-50', 'border-brand-200', 'text-brand-600');
+        setSpState('onhold');
+      }
+    };
+
+    window.spStartTransfer = function() {
+      const section = $('spTransferSection');
+      section.classList.toggle('sp-hidden');
+      if (!section.classList.contains('sp-hidden')) $('spTransferNumber').focus();
+    };
+
+    window.spDoTransfer = function() {
+      if (!plivoBrowser) return;
+      const target = $('spTransferNumber').value.trim();
+      if (!target) { $('spTransferNumber').focus(); return; }
+
+      try {
+        fetch(`${BASE_URL}/api/v1/calls/${spCurrentConvId}/transfer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': getTenantId() },
+          body: JSON.stringify({ target_number: target }),
+        }).catch(err => console.warn('[Softphone] Transfer API error:', err));
+      } catch (e) {
+        console.warn('[Softphone] Transfer error:', e);
+      }
+      toggleEl('spTransferSection', false);
+    };
+
+    window.spEndCall = function() {
+      if (!plivoBrowser) return;
+      plivoBrowser.client.hangup();
+    };
+
+    window.spToggleForward = function() {
+      spForwardEnabled = !spForwardEnabled;
+      const track = $('spForwardToggle');
+      const thumb = track.querySelector('.sp-toggle-thumb');
+      if (spForwardEnabled) {
+        track.classList.remove('bg-gray-200');
+        track.classList.add('bg-brand-600');
+        thumb.style.transform = 'translateX(16px)';
+        $('spForwardNumberRow').classList.remove('sp-hidden');
+        $('spForwardNumber').focus();
+      } else {
+        track.classList.remove('bg-brand-600');
+        track.classList.add('bg-gray-200');
+        thumb.style.transform = 'translateX(0)';
+        $('spForwardNumberRow').classList.add('sp-hidden');
+      }
+    };
+
+
+    // ===== BACKEND INTEGRATION =====
+
+    function notifyAgentStatus(status) {
+      if (!spAgentId) return;
+      fetch(`${BASE_URL}/api/v1/agents/${encodeURIComponent(spAgentId)}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': getTenantId() },
+        body: JSON.stringify({ status }),
+      }).catch(err => console.warn('[Softphone] Agent status update error:', err));
+    }
+
+    function notifyCallAnswer(convId) {
+      const fwdNum = spForwardEnabled ? ($('spForwardNumber').value.trim() || null) : null;
+      fetch(`${BASE_URL}/api/v1/calls/${encodeURIComponent(convId)}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': getTenantId() },
+        body: JSON.stringify({ agent_id: spAgentId, forward_to: fwdNum }),
+      }).catch(err => console.warn('[Softphone] Call answer notify error:', err));
+      notifyAgentStatus('on_call');
+    }
+
+    function notifyCallEnd(convId) {
+      fetch(`${BASE_URL}/api/v1/calls/${encodeURIComponent(convId)}/end`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': getTenantId() },
+        body: JSON.stringify({ agent_id: spAgentId }),
+      }).catch(err => console.warn('[Softphone] Call end notify error:', err));
+    }
+
+    function fetchEscalationContext(convId) {
+      fetch(`${BASE_URL}/api/v1/conversations/${encodeURIComponent(convId)}/handoff-events`, {
+        headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': getTenantId() },
+      })
+        .then(res => { if (!res.ok) throw new Error('Not found'); return res.json(); })
+        .then(data => {
+          const events = Array.isArray(data) ? data : (data.events || data.data || []);
+          if (events.length === 0) return;
+
+          const latest = events[events.length - 1];
+          const reason = latest.reason || latest.escalation_reason || '';
+          const fromHandler = latest.from_handler || latest.from_state || '';
+          const summary = latest.summary || latest.context || '';
+
+          let contextHtml = '';
+          if (reason) contextHtml += `<div><strong>Reason:</strong> ${escapeHtmlSP(reason)}</div>`;
+          if (fromHandler) contextHtml += `<div><strong>From:</strong> ${escapeHtmlSP(fromHandler)}</div>`;
+          if (summary) contextHtml += `<div><strong>Summary:</strong> ${escapeHtmlSP(summary)}</div>`;
+          if (events.length > 1) contextHtml += `<div class="mt-1 text-gray-400">${events.length} handoff events total</div>`;
+
+          if (contextHtml) {
+            $('spContextBody').innerHTML = contextHtml;
+            $('spEscalationContext').classList.remove('sp-hidden');
+          }
+        })
+        .catch(() => {});
+    }
+
+    function moveContextToActiveCall() {
+      const src = $('spContextBody');
+      const dest = $('spActiveContextBody');
+      if (src && dest && src.innerHTML) {
+        dest.innerHTML = src.innerHTML;
+        $('spActiveEscalationContext').classList.remove('sp-hidden');
+      }
+    }
+
+    function hideEscalationContext() {
+      $('spEscalationContext').classList.add('sp-hidden');
+      $('spActiveEscalationContext').classList.add('sp-hidden');
+      $('spContextBody').innerHTML = '';
+      $('spActiveContextBody').innerHTML = '';
+    }
+
+    function escapeHtmlSP(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.appendChild(document.createTextNode(String(str)));
+      return div.innerHTML;
+    }
+
+
+    // ===== INIT =====
+    setSpState('idle');
+
+  })();
+  </script>
+
+</body>
+</html>
