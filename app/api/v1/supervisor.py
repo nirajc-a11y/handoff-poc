@@ -21,7 +21,7 @@ from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
 from app.db.models.conversation import Conversation
-from app.livekit import session_registry
+from app.voice_ai import session_registry
 
 logger = logging.getLogger(__name__)
 

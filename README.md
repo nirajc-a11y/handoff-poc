@@ -303,7 +303,7 @@ handoff-poc/
 │   │   ├── twilio/             #   Twilio Voice implementation
 │   │   ├── plivo/              #   Plivo Voice implementation
 │   │   └── mock/               #   Mock providers for all channels
-│   ├── livekit/
+│   ├── voice_ai/
 │   │   ├── voice_agent.py      #   VoiceAISession (barge-in, streaming, echo guard)
 │   │   ├── sarvam.py           #   Sarvam STT/TTS client (shared httpx pool)
 │   │   └── session_registry.py #   Active session tracking for supervisor

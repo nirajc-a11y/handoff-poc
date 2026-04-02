@@ -25,9 +25,9 @@ from app.core.handoff_engine import handoff_engine
 from app.core.state_machine import Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
-from app.livekit.voice_agent import VoiceAISession
-from app.livekit import session_registry
-from app.livekit.session_registry import SessionHandle
+from app.voice_ai.voice_agent import VoiceAISession
+from app.voice_ai import session_registry
+from app.voice_ai.session_registry import SessionHandle
 
 logger = logging.getLogger(__name__)
 
@@ -269,14 +269,27 @@ async def plivo_audio_stream(
             turn_had_messages = False
 
             async with async_session_factory() as db:
-                mulaw_response = await session.process_turn(db_session=db, on_audio=send_chunk_with_bargein)
+                try:
+                    mulaw_response = await asyncio.wait_for(
+                        session.process_turn(db_session=db, on_audio=send_chunk_with_bargein),
+                        timeout=15.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("process_turn timed out after 15s: conv=%s", conv_id)
+                    session.reset_listening()
+                    return
+                except Exception:
+                    logger.exception("Error in process_turn: conv=%s", conv_id)
+                    session.reset_listening()
+                    return
 
                 if session.barge_in_requested:
-                    # User interrupted -- clear Plivo's audio buffer and resume listening
                     await send_clear_audio()
-                    session.finish_speaking()
-                    turn_had_messages = True
-                    logger.info("Barge-in handled: cancelled TTS, resuming listening")
+                    # Always use reset_listening — preserves barge-in buffer, no cooldown.
+                    # User is actively speaking (proven by barge-in), so no echo guard needed.
+                    session.reset_listening()
+                    turn_had_messages = mulaw_response is not None
+                    logger.info("Barge-in handled: cancelled TTS, buffer preserved, no cooldown")
                 elif mulaw_response == b"":
                     # Audio was streamed via on_audio callback.
                     # Wait for Plivo to finish playing buffered audio before listening.
@@ -300,8 +313,9 @@ async def plivo_audio_stream(
                         session.finish_speaking()
                     turn_had_messages = True
                 else:
-                    # STT returned empty -- just reset
-                    session.finish_speaking()
+                    # Null turn (noise, hallucination, empty STT).
+                    # No TTS played — lightweight reset, no cooldown or echo guard.
+                    session.reset_listening()
 
                 await db.commit()
 

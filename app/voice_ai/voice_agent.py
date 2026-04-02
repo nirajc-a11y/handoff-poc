@@ -6,11 +6,12 @@ transcribes, generates LLM response, synthesizes, returns mulaw audio.
 Production features:
 - Barge-in: detects user speech during TTS playback and cancels output
 - Streaming TTS: sentences pipelined from LLM to TTS as they arrive
-- Tuned thresholds: 0.6s silence detection, 0.4s cooldown
+- Tuned thresholds: 0.6s silence detection, 0.3s cooldown, 3s echo guard window
 """
 
 import asyncio
 import io
+import time
 
 try:
     import audioop  # available in Python <=3.12
@@ -25,7 +26,7 @@ import httpx
 
 from app.config import settings
 from app.core.ai_engine import ai_engine, AIResponse
-from app.livekit import sarvam
+from app.voice_ai import sarvam
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +83,23 @@ class VoiceAISession:
         self.should_escalate = False
         self.should_end_call = False
         self._cooldown_remaining = 0
+        self._tts_finished_at: float = 0.0  # monotonic time when last TTS playback ended
 
         # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
-        self.silence_threshold = 200   # RMS below this = silence (16-bit PCM scale)
+        self.silence_threshold = 400   # RMS below this = silence (phone line noise is 200-300)
         self.silence_duration_frames = 4800  # ~0.6 seconds (industry standard)
-        self.min_speech_frames = 2400  # ~0.3 seconds
+        self.min_speech_frames = 3200  # ~0.4 seconds (reject very short noise bursts)
+
+        # Speech onset detection — require consecutive speech frames before buffering.
+        # Prevents sporadic noise spikes from triggering STT calls.
+        self._speech_started = False
+        self._speech_onset_count = 0
+        self._speech_onset_required = 5  # ~100ms of consecutive speech to confirm onset
 
         # Barge-in state
         self._state = SpeakingState.LISTENING
         self._barge_in_event = asyncio.Event()
-        self._barge_in_energy_threshold = 400  # Higher than silence to reject echo
+        self._barge_in_energy_threshold = 600  # Higher than silence (400) to reject echo
         self._barge_in_consecutive = 0
         self._barge_in_required_frames = 3     # ~60ms of speech to confirm
 
@@ -105,6 +113,9 @@ class VoiceAISession:
             "yes yes yes", "yes yes", "yes,", "yes, yes", "yes, yes, yes",
             "हो", "हो.", "हां", "हां.", "हम्म", "अच्छा",
         }
+
+        # Max audio buffer: 5 seconds at 8kHz mulaw (prevents runaway buffering on noisy lines)
+        self._max_buffer_bytes = 40000
 
     # ------------------------------------------------------------------
     # Public properties for backward compat
@@ -153,11 +164,30 @@ class VoiceAISession:
         """Mark TTS playback as complete, discard echo, and start cooldown."""
         self.audio_buffer.clear()
         self.silence_frames = 0
-        self._cooldown_remaining = 4800  # ~0.6 seconds at 8kHz
+        self._cooldown_remaining = 2400  # ~0.3s at 8kHz (safety margin; playback wait handles most echo)
         self._state = SpeakingState.LISTENING
         self._barge_in_event.clear()
         self._barge_in_consecutive = 0
         self._post_tts_guard = True  # Enable echo guard for next utterance
+        self._tts_finished_at = time.monotonic()
+        self._speech_started = False
+        self._speech_onset_count = 0
+
+    def reset_listening(self):
+        """Lightweight reset after a null turn (no TTS was played).
+
+        Unlike finish_speaking(), this does NOT:
+        - Apply cooldown (no echo to wait for)
+        - Enable echo guard (no TTS output to echo)
+        - Clear audio_buffer (preserves any accumulated speech)
+        """
+        self.silence_frames = 0
+        self._state = SpeakingState.LISTENING
+        self._barge_in_event.clear()
+        self._barge_in_consecutive = 0
+        # If buffer has content (e.g. from barge-in), speech is already confirmed
+        self._speech_started = len(self.audio_buffer) > 0
+        self._speech_onset_count = 0
 
     # ------------------------------------------------------------------
     # Audio input
@@ -205,11 +235,32 @@ class VoiceAISession:
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= len(mulaw_chunk)
             return False
+
+        # Speech onset detection: require consecutive speech frames before
+        # buffering. This prevents sporadic noise spikes from triggering
+        # STT calls (e.g., phone-line crackle transcribed as "Telugu").
+        if not self._speech_started:
+            if rms_energy >= self.silence_threshold:
+                self._speech_onset_count += 1
+                if self._speech_onset_count >= self._speech_onset_required:
+                    self._speech_started = True
+                    self.audio_buffer.extend(mulaw_chunk)
+            else:
+                self._speech_onset_count = 0
+            return False
+
+        # Speech confirmed — buffer and detect pause
         self.audio_buffer.extend(mulaw_chunk)
         if rms_energy < self.silence_threshold:
             self.silence_frames += len(mulaw_chunk)
         else:
             self.silence_frames = 0
+
+        # Cap buffer to prevent runaway accumulation on noisy lines.
+        if len(self.audio_buffer) >= self._max_buffer_bytes:
+            logger.info("Buffer cap reached (%d bytes), forcing speech pause", len(self.audio_buffer))
+            return True
+
         return (len(self.audio_buffer) > self.min_speech_frames
                 and self.silence_frames >= self.silence_duration_frames)
 
@@ -249,10 +300,43 @@ class VoiceAISession:
             self.silence_frames = 0
             return None
 
+        # Check speech ratio — require that >=15% of frames have energy above
+        # threshold. Phone noise produces occasional spikes but not sustained energy.
+        chunk_size = 320  # 20ms frames
+        raw = bytes(self.audio_buffer)
+        speech_frames = 0
+        total_frames = 0
+        for i in range(0, len(raw), chunk_size):
+            frame = raw[i:i + chunk_size]
+            if len(frame) < 160:
+                break
+            total_frames += 1
+            frame_pcm = audioop.ulaw2lin(frame, 2)
+            if audioop.rms(frame_pcm, 2) >= self.silence_threshold:
+                speech_frames += 1
+        if total_frames > 0 and speech_frames / total_frames < 0.25:
+            logger.debug("Skipping STT: speech ratio %.1f%% below 25%% (%d/%d frames)",
+                         speech_frames / total_frames * 100, speech_frames, total_frames)
+            self.audio_buffer.clear()
+            self.silence_frames = 0
+            return None
+
         self.start_speaking()
         audio_data = bytes(self.audio_buffer)
         self.audio_buffer.clear()
         self.silence_frames = 0
+
+        # Trim trailing silence (from the 0.6s silence detection window).
+        # Sending silence to STT increases hallucination risk.
+        trim_chunk = 160  # 20ms frames
+        while len(audio_data) > trim_chunk:
+            tail_pcm = audioop.ulaw2lin(audio_data[-trim_chunk:], 2)
+            if audioop.rms(tail_pcm, 2) >= self.silence_threshold:
+                break
+            audio_data = audio_data[:-trim_chunk]
+        if len(audio_data) < self.min_speech_frames:
+            self._state = SpeakingState.LISTENING
+            return None
 
         try:
             wav_data = _mulaw_to_wav(audio_data)
@@ -262,15 +346,60 @@ class VoiceAISession:
                 self._state = SpeakingState.LISTENING
                 return None
 
-            # Echo guard: discard short phantom transcripts from phone-line echo
-            if self._post_tts_guard:
-                self._post_tts_guard = False  # Only applies to first utterance after TTS
-                cleaned = transcript.strip().lower().rstrip(".!,")
-                words = cleaned.split()
-                if len(words) <= 4 and cleaned in self._echo_phrases:
-                    logger.info("Echo guard: discarding likely echo '%s'", transcript.strip())
+            # --- STT hallucination detection ---
+            # Whisper-family models hallucinate repetitive text on noise/silence.
+            words_raw = transcript.strip().lower().replace(",", " ").replace(".", " ").split()
+
+            # 1) Single-word hallucination: STT often returns a random word
+            #    ("But", "The", "So") from noise. Only allow plausible 1-word utterances.
+            _valid_single_words = {
+                "hello", "hi", "hey", "yes", "no", "yeah", "nah", "help",
+                "thanks", "bye", "okay", "ok", "please", "stop", "wait",
+                "नमस्ते", "हां", "नहीं", "हेलो", "धन्यवाद",
+            }
+            if len(words_raw) == 1 and words_raw[0].rstrip(".,!?") not in _valid_single_words:
+                logger.info("Hallucination guard: discarding single-word STT '%s'", transcript.strip())
+                self._state = SpeakingState.LISTENING
+                return None
+
+            # 2) Repetitive hallucination: same word >60% of transcript
+            if len(words_raw) > 4:
+                from collections import Counter
+                word_counts = Counter(words_raw)
+                most_common_word, most_common_count = word_counts.most_common(1)[0]
+                if most_common_count / len(words_raw) > 0.6:
+                    logger.info("Hallucination guard: discarding repetitive STT ('%s' x%d in %d words)",
+                                most_common_word, most_common_count, len(words_raw))
                     self._state = SpeakingState.LISTENING
                     return None
+
+            # Echo guard: discard short phantom transcripts from phone-line echo.
+            # Only active within 3s of TTS ending — real echo decays in <1s,
+            # the extra margin covers slow phone networks.
+            if self._post_tts_guard:
+                echo_age = time.monotonic() - self._tts_finished_at
+                if echo_age > 3.0:
+                    # Guard expired — treat all speech as genuine
+                    logger.debug("Echo guard expired (%.1fs since TTS), accepting transcript", echo_age)
+                    self._post_tts_guard = False
+                else:
+                    self._post_tts_guard = False  # One-shot: only first utterance after TTS
+                    cleaned = transcript.strip().lower().rstrip(".!,")
+                    words = cleaned.split()
+                    # Check short echo phrases
+                    if len(words) <= 4 and cleaned in self._echo_phrases:
+                        logger.info("Echo guard: discarding likely echo '%s' (%.1fs after TTS)",
+                                    transcript.strip(), echo_age)
+                        self._state = SpeakingState.LISTENING
+                        return None
+                    # Also discard if it's entirely echo-like words (any length)
+                    echo_words = {"yes", "yeah", "ya", "ok", "okay", "hmm", "hm", "uh", "um", "ah", "mm",
+                                  "right", "sure", "हो", "हां", "हम्म", "अच्छा"}
+                    if all(w.rstrip(".,!?") in echo_words for w in words):
+                        logger.info("Echo guard: discarding all-echo transcript '%s' (%.1fs after TTS)",
+                                    transcript.strip()[:80], echo_age)
+                        self._state = SpeakingState.LISTENING
+                        return None
 
             logger.info("Turn %d - Customer: %s", self.turn_count, transcript)
 

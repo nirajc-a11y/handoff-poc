@@ -42,7 +42,10 @@ async def close_client():
 
 
 async def transcribe(audio_data: bytes, language: str = "en") -> str:
-    """Transcribe audio using Sarvam saarika STT.
+    """Transcribe audio using Groq Whisper (primary) with Sarvam fallback.
+
+    Groq Whisper is significantly more accurate for telephony audio.
+    Falls back to Sarvam saarika if Groq is unavailable.
 
     Args:
         audio_data: Raw audio bytes (WAV format)
@@ -50,6 +53,43 @@ async def transcribe(audio_data: bytes, language: str = "en") -> str:
     Returns:
         Transcribed text
     """
+    # Primary: Groq Whisper
+    if settings.groq_api_key:
+        try:
+            return await _transcribe_groq(audio_data, language)
+        except Exception as exc:
+            logger.warning("Groq STT failed, falling back to Sarvam: %s", exc)
+
+    # Fallback: Sarvam saarika
+    return await _transcribe_sarvam(audio_data, language)
+
+
+async def _transcribe_groq(audio_data: bytes, language: str = "en") -> str:
+    """Transcribe audio using Groq Whisper (whisper-large-v3-turbo)."""
+    lang_code = {"en": "en", "mr": "mr", "hi": "hi"}.get(language, "en")
+
+    client = _get_client()
+    resp = await client.post(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+        files={"file": ("audio.wav", audio_data, "audio/wav")},
+        data={
+            "model": "whisper-large-v3-turbo",
+            "language": lang_code,
+            "response_format": "json",
+        },
+    )
+    if resp.status_code >= 400:
+        logger.error("Groq STT error %d for lang=%s: %s", resp.status_code, lang_code, resp.text[:500])
+    resp.raise_for_status()
+    result = resp.json()
+    transcript = result.get("text", "")
+    logger.info("Groq STT (%s): %s", language, transcript[:100])
+    return transcript
+
+
+async def _transcribe_sarvam(audio_data: bytes, language: str = "en") -> str:
+    """Transcribe audio using Sarvam saarika STT (fallback)."""
     if not settings.sarvam_api_key:
         raise ValueError("SARVAM_API_KEY is not configured. Cannot call Sarvam STT.")
 

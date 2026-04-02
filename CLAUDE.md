@@ -72,7 +72,7 @@ Pluggable ABC interfaces for 4 channels: `TelephonyProvider`, `WhatsAppProvider`
 
 Implementations: Twilio, Plivo (voice only), Mock (all channels). Providers are registered at startup in `app/main.py` lifespan based on env var presence.
 
-### Real-time Voice AI (`app/livekit/voice_agent.py`)
+### Real-time Voice AI (`app/voice_ai/voice_agent.py`)
 
 Production-grade bidirectional voice AI pipeline:
 
@@ -98,7 +98,7 @@ Latency budget: ~1.5-2.0s turn latency (down from ~4.5s). See `VOICE_AI_FINDINGS
 
 Live call supervision with Listen, Whisper, and Barge modes:
 
-- **Session Registry** (`app/livekit/session_registry.py`): Module-level dict tracking active `VoiceAISession` instances by `conversation_id`. Stores session, Plivo WebSocket, stream_sid, and listener queues. Registered/unregistered in `plivo_stream.py`.
+- **Session Registry** (`app/voice_ai/session_registry.py`): Module-level dict tracking active `VoiceAISession` instances by `conversation_id`. Stores session, Plivo WebSocket, stream_sid, and listener queues. Registered/unregistered in `plivo_stream.py`.
 - **Listen** (`WS /api/v1/supervisor/listen/{conv_id}`): Forwards a copy of caller + AI audio to supervisor browser via WebSocket. Frontend decodes mulaw and plays via Web Audio API.
 - **Whisper** (`POST /api/v1/supervisor/whisper/{conv_id}`): Injects supervisor guidance as a system message into `conversation_history`. AI incorporates it in the next response. Customer never hears it.
 - **Barge** (`POST /api/v1/supervisor/barge/{conv_id}`): Cancels AI pipeline (`_barge_in_event`), sends `clearAudio`, transitions to `QUEUED_FOR_HUMAN`, redirects Plivo call to conference room. Supervisor joins via browser softphone.

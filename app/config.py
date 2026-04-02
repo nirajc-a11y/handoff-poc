@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_number: str = ""  # The Twilio phone number (e.g. "+14155551234")
 
-    # LiveKit (real-time audio streaming)
+    # LiveKit (unused — kept so .env values don't break pydantic-settings)
     livekit_url: str = ""
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
