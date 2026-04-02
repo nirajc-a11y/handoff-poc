@@ -2,6 +2,11 @@
 
 Receives raw mulaw audio from Plivo <Stream>, processes through
 VoiceAISession (Sarvam STT -> Groq LLM -> Sarvam TTS), sends audio back.
+
+Production features:
+- Streaming greeting TTS (~500ms to first audio)
+- Barge-in: clearAudio + cancel TTS when user interrupts
+- Sentence-pipelined TTS via streaming LLM
 """
 
 import asyncio
@@ -57,7 +62,7 @@ async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
         call_uuid = result.scalar_one_or_none()
 
         if not call_uuid:
-            logger.warning("No ChannelSession found for conv=%s — cannot redirect call", conv_id)
+            logger.warning("No ChannelSession found for conv=%s -- cannot redirect call", conv_id)
             return
 
         escalate_url = (
@@ -127,15 +132,26 @@ async def plivo_audio_stream(
     ws_open = True
     processing_lock = asyncio.Lock()
 
+    # Track bytes sent during streaming TTS to calculate playback wait.
+    # Sarvam generates audio faster than real-time, so Plivo buffers and
+    # plays it back over a longer duration than we spend sending.
+    _stream_bytes_sent = 0
+    _stream_start_time = 0.0  # 0.0 = sentinel meaning "no chunk sent yet"
+    _ECHO_BUFFER = 0.5  # Extra wait for phone-line echo round-trip (300-500ms)
+
+    # ------------------------------------------------------------------
+    # Audio send helpers
+    # ------------------------------------------------------------------
+
     async def send_audio(mulaw_data: bytes):
-        """Send mulaw audio back to Plivo. Keeps is_speaking=True to block echo."""
+        """Send mulaw audio back to Plivo in chunks."""
         nonlocal ws_open
         if not stream_started or not ws_open:
             return
         logger.info("Sending %d bytes of mulaw audio (%d chunks)", len(mulaw_data), len(mulaw_data) // 320 + 1)
         chunk_size = 320  # 20ms at 8kHz mulaw
         for i in range(0, len(mulaw_data), chunk_size):
-            if not ws_open:
+            if not ws_open or session.barge_in_requested:
                 break
             chunk = mulaw_data[i:i + chunk_size]
             try:
@@ -153,9 +169,42 @@ async def plivo_audio_stream(
                 ws_open = False
                 break
 
+    def _reset_stream_tracker():
+        """Reset streaming playback tracker before a new TTS stream."""
+        nonlocal _stream_bytes_sent, _stream_start_time
+        _stream_bytes_sent = 0
+        _stream_start_time = 0.0  # Will be set on first send_chunk call
+
+    async def _wait_for_playback():
+        """Wait for Plivo to finish playing buffered streaming audio.
+
+        Streaming TTS sends chunks to Plivo faster than real-time (e.g.
+        3.85s of audio generated in 1.3s). Plivo queues them and plays
+        back at real-time speed. We must wait for that playback to end
+        before calling finish_speaking(), otherwise the system hears
+        its own voice as echo and transcribes it as phantom 'Yes'.
+
+        Also adds an echo buffer (500ms) for phone-line round-trip delay.
+        The wait is interruptible by barge-in.
+        """
+        if _stream_bytes_sent == 0 or _stream_start_time == 0.0:
+            return
+        playback_secs = _stream_bytes_sent / 8000
+        elapsed = asyncio.get_event_loop().time() - _stream_start_time
+        remaining = playback_secs - elapsed + _ECHO_BUFFER
+        if remaining > 0:
+            logger.info("Waiting %.1fs for Plivo playback to finish (%d bytes = %.1fs audio, sent in %.1fs, +%.1fs echo buffer)",
+                        remaining, _stream_bytes_sent, playback_secs, elapsed, _ECHO_BUFFER)
+            # Wait for playback OR barge-in, whichever comes first
+            try:
+                await asyncio.wait_for(session._barge_in_event.wait(), timeout=remaining)
+                logger.info("Barge-in interrupted playback wait")
+            except asyncio.TimeoutError:
+                pass  # Normal: playback finished without interruption
+
     async def send_chunk(mulaw_chunk: bytes):
         """Send a single streaming TTS chunk to Plivo immediately."""
-        nonlocal ws_open
+        nonlocal ws_open, _stream_bytes_sent, _stream_start_time
         if not stream_started or not ws_open:
             return
         try:
@@ -168,44 +217,87 @@ async def plivo_audio_stream(
                     "payload": base64.b64encode(mulaw_chunk).decode("ascii"),
                 },
             })
+            # Start timer on first chunk — not before STT/LLM processing
+            if _stream_start_time == 0.0:
+                _stream_start_time = asyncio.get_event_loop().time()
+            _stream_bytes_sent += len(mulaw_chunk)
         except Exception:
             ws_open = False
+
+    async def send_chunk_with_bargein(mulaw_chunk: bytes):
+        """Send a streaming TTS chunk, but stop if barge-in detected."""
+        if session.barge_in_requested:
+            return
+        await send_chunk(mulaw_chunk)
+
+    async def send_clear_audio():
+        """Tell Plivo to stop playing any queued audio (barge-in)."""
+        nonlocal ws_open
+        if not stream_started or not ws_open:
+            return
+        try:
+            await ws.send_json({
+                "event": "clearAudio",
+                "streamId": stream_sid,
+            })
+            logger.info("Sent clearAudio to Plivo (barge-in)")
+        except Exception:
+            ws_open = False
+
+    # ------------------------------------------------------------------
+    # Turn processing
+    # ------------------------------------------------------------------
 
     async def process_and_respond():
         nonlocal ws_open
         async with processing_lock:
+            _reset_stream_tracker()
+            turn_had_messages = False
+
             async with async_session_factory() as db:
-                # Pass send_chunk so TTS audio streams to caller as it generates
-                mulaw_response = await session.process_turn(db_session=db, on_audio=send_chunk)
-                if mulaw_response == b"":
-                    # Audio was streamed via on_audio callback — just finish speaking
-                    # No need to wait for playback since chunks were sent in real-time
+                mulaw_response = await session.process_turn(db_session=db, on_audio=send_chunk_with_bargein)
+
+                if session.barge_in_requested:
+                    # User interrupted -- clear Plivo's audio buffer and resume listening
+                    await send_clear_audio()
                     session.finish_speaking()
-                    if conv_id and tenant_id:
-                        await event_bus.publish(Event(
-                            topic="conversation.message_added",
-                            tenant_id=_uuid.UUID(tenant_id),
-                            payload={"conversation_id": conv_id},
-                        ))
+                    turn_had_messages = True
+                    logger.info("Barge-in handled: cancelled TTS, resuming listening")
+                elif mulaw_response == b"":
+                    # Audio was streamed via on_audio callback.
+                    # Wait for Plivo to finish playing buffered audio before listening.
+                    await _wait_for_playback()
+                    if session.barge_in_requested:
+                        await send_clear_audio()
+                    session.finish_speaking()
+                    turn_had_messages = True
                 elif mulaw_response and ws_open:
-                    # Fallback: full TTS response — send all at once
+                    # Fallback: full TTS response -- send all at once
                     await send_audio(mulaw_response)
-                    playback_secs = len(mulaw_response) / 8000
-                    send_secs = (len(mulaw_response) // 320 + 1) * 0.018
-                    remaining = playback_secs - send_secs
-                    if remaining > 0:
-                        await asyncio.sleep(remaining)
-                    session.finish_speaking()
-                    if conv_id and tenant_id:
-                        await event_bus.publish(Event(
-                            topic="conversation.message_added",
-                            tenant_id=_uuid.UUID(tenant_id),
-                            payload={"conversation_id": conv_id},
-                        ))
+                    if session.barge_in_requested:
+                        await send_clear_audio()
+                        session.finish_speaking()
+                    else:
+                        playback_secs = len(mulaw_response) / 8000
+                        send_secs = (len(mulaw_response) // 320 + 1) * 0.018
+                        remaining = playback_secs - send_secs
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                        session.finish_speaking()
+                    turn_had_messages = True
                 else:
-                    # STT returned empty — just reset
+                    # STT returned empty -- just reset
                     session.finish_speaking()
+
                 await db.commit()
+
+                # Notify frontend of new messages for ALL paths that saved data
+                if turn_had_messages and conv_id and tenant_id:
+                    await event_bus.publish(Event(
+                        topic="conversation.message_added",
+                        tenant_id=_uuid.UUID(tenant_id),
+                        payload={"conversation_id": conv_id},
+                    ))
 
                 # After sending AI response, check if escalation or hangup is needed
                 if session.should_escalate and conv_id and tenant_id:
@@ -213,10 +305,11 @@ async def plivo_audio_stream(
                 elif session.should_end_call and conv_id and tenant_id:
                     await _handle_stream_hangup(db, tenant_id, conv_id)
 
-    try:
-        greeting_audio = await session.get_greeting_audio()
-        logger.info("Greeting audio: %s", f"{len(greeting_audio)} bytes" if greeting_audio else "NONE (TTS failed)")
+    # ------------------------------------------------------------------
+    # WebSocket event loop
+    # ------------------------------------------------------------------
 
+    try:
         while True:
             data = await ws.receive_text()
             msg = json.loads(data)
@@ -227,20 +320,19 @@ async def plivo_audio_stream(
                 start_data = msg.get("start", {})
                 stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
                 logger.info("Stream started: sid=%s", stream_sid)
-                if greeting_audio:
-                    session.is_speaking = True
-                    await send_audio(greeting_audio)
-                    # Don't block the loop — schedule finish_speaking in background
-                    # so is_speaking=True rejects echo audio in real-time via add_audio()
-                    _greet_len = len(greeting_audio)
-                    async def _finish_greeting():
-                        playback_secs = _greet_len / 8000
-                        send_secs = (_greet_len // 320 + 1) * 0.018
-                        remaining = playback_secs - send_secs
-                        if remaining > 0:
-                            await asyncio.sleep(remaining)
+
+                # Stream greeting with low latency (~500ms to first audio)
+                # Acquire processing_lock to prevent interleaved sends with turn processing
+                async def _stream_greeting():
+                    async with processing_lock:
+                        _reset_stream_tracker()
+                        await session.stream_greeting(send_chunk)
+                        # Wait for Plivo to finish playing buffered greeting audio
+                        await _wait_for_playback()
+                        if session.barge_in_requested:
+                            await send_clear_audio()
                         session.finish_speaking()
-                    asyncio.create_task(_finish_greeting())
+                asyncio.create_task(_stream_greeting())
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")

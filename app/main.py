@@ -54,6 +54,8 @@ async def lifespan(app: FastAPI):
 
     yield
     # Shutdown
+    from app.livekit import sarvam
+    await sarvam.close_client()
     await engine.dispose()
 
 

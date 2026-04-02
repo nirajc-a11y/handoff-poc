@@ -1,4 +1,8 @@
-"""Sarvam AI client for Indian language STT (saarika) and TTS (bulbul)."""
+"""Sarvam AI client for Indian language STT (saarika) and TTS (bulbul).
+
+Uses a shared httpx connection pool to avoid TCP+TLS handshake overhead
+on every API call (~100-300ms savings per call).
+"""
 
 import base64
 import logging
@@ -11,6 +15,30 @@ SARVAM_BASE = "https://api.sarvam.ai"
 
 # v2 → v3 speaker mapping (backward compat for existing tenant configs)
 V2_TO_V3_SPEAKER = {"meera": "ritu", "arvind": "aditya"}
+
+# ---------------------------------------------------------------------------
+# Shared httpx connection pool — reuses TCP+TLS connections across calls
+# ---------------------------------------------------------------------------
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=5.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        )
+    return _client
+
+
+async def close_client():
+    """Shut down the shared httpx client. Call from FastAPI lifespan shutdown."""
+    global _client
+    if _client and not _client.is_closed:
+        await _client.aclose()
+        _client = None
 
 
 async def transcribe(audio_data: bytes, language: str = "en") -> str:
@@ -27,20 +55,20 @@ async def transcribe(audio_data: bytes, language: str = "en") -> str:
 
     lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE}/speech-to-text-translate",
-            headers={"api-subscription-key": settings.sarvam_api_key},
-            files={"file": ("audio.wav", audio_data, "audio/wav")},
-            data={"model": "saaras:v3", "language_code": lang_code},
-        )
-        if resp.status_code >= 400:
-            logger.error("Sarvam STT error %d for lang=%s: %s", resp.status_code, lang_code, resp.text[:500])
-        resp.raise_for_status()
-        result = resp.json()
-        transcript = result.get("transcript", "")
-        logger.info("Sarvam STT (%s): %s", lang_code, transcript[:100])
-        return transcript
+    client = _get_client()
+    resp = await client.post(
+        f"{SARVAM_BASE}/speech-to-text-translate",
+        headers={"api-subscription-key": settings.sarvam_api_key},
+        files={"file": ("audio.wav", audio_data, "audio/wav")},
+        data={"model": "saaras:v3", "language_code": lang_code},
+    )
+    if resp.status_code >= 400:
+        logger.error("Sarvam STT error %d for lang=%s: %s", resp.status_code, lang_code, resp.text[:500])
+    resp.raise_for_status()
+    result = resp.json()
+    transcript = result.get("transcript", "")
+    logger.info("Sarvam STT (%s): %s", lang_code, transcript[:100])
+    return transcript
 
 
 async def synthesize(
@@ -64,32 +92,32 @@ async def synthesize(
     lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
     speaker = V2_TO_V3_SPEAKER.get(speaker, speaker)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE}/text-to-speech",
-            headers={
-                "api-subscription-key": settings.sarvam_api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "target_language_code": lang_code,
-                "speaker": speaker,
-                "model": "bulbul:v3",
-                "temperature": temperature,
-                "pace": pace,
-            },
-        )
-        if resp.status_code >= 400:
-            logger.error("Sarvam TTS error %d: %s", resp.status_code, resp.text[:500])
-        resp.raise_for_status()
-        result = resp.json()
-        audio_b64 = result.get("audios", [None])[0]
-        if not audio_b64:
-            raise ValueError(f"No audio in Sarvam TTS response: {list(result.keys())}")
-        audio_data = base64.b64decode(audio_b64)
-        logger.info("Sarvam TTS (%s, %s): %d bytes", lang_code, speaker, len(audio_data))
-        return audio_data
+    client = _get_client()
+    resp = await client.post(
+        f"{SARVAM_BASE}/text-to-speech",
+        headers={
+            "api-subscription-key": settings.sarvam_api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "text": text,
+            "target_language_code": lang_code,
+            "speaker": speaker,
+            "model": "bulbul:v3",
+            "temperature": temperature,
+            "pace": pace,
+        },
+    )
+    if resp.status_code >= 400:
+        logger.error("Sarvam TTS error %d: %s", resp.status_code, resp.text[:500])
+    resp.raise_for_status()
+    result = resp.json()
+    audio_b64 = result.get("audios", [None])[0]
+    if not audio_b64:
+        raise ValueError(f"No audio in Sarvam TTS response: {list(result.keys())}")
+    audio_data = base64.b64decode(audio_b64)
+    logger.info("Sarvam TTS (%s, %s): %d bytes", lang_code, speaker, len(audio_data))
+    return audio_data
 
 
 async def synthesize_stream(
@@ -108,30 +136,30 @@ async def synthesize_stream(
     lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
     speaker = V2_TO_V3_SPEAKER.get(speaker, speaker)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        async with client.stream(
-            "POST",
-            f"{SARVAM_BASE}/text-to-speech/stream",
-            headers={
-                "api-subscription-key": settings.sarvam_api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "target_language_code": lang_code,
-                "speaker": speaker,
-                "model": "bulbul:v3",
-                "output_audio_codec": "mulaw",
-                "speech_sample_rate": 8000,
-                "pace": pace,
-            },
-        ) as resp:
-            if resp.status_code >= 400:
-                body = await resp.aread()
-                logger.error("Sarvam TTS stream error %d: %s", resp.status_code, body[:500])
-                resp.raise_for_status()
-            total = 0
-            async for chunk in resp.aiter_bytes(chunk_size=640):
-                total += len(chunk)
-                yield chunk
-            logger.info("Sarvam TTS stream (%s, %s): %d bytes total", lang_code, speaker, total)
+    client = _get_client()
+    async with client.stream(
+        "POST",
+        f"{SARVAM_BASE}/text-to-speech/stream",
+        headers={
+            "api-subscription-key": settings.sarvam_api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "text": text,
+            "target_language_code": lang_code,
+            "speaker": speaker,
+            "model": "bulbul:v3",
+            "output_audio_codec": "mulaw",
+            "speech_sample_rate": 8000,
+            "pace": pace,
+        },
+    ) as resp:
+        if resp.status_code >= 400:
+            body = await resp.aread()
+            logger.error("Sarvam TTS stream error %d: %s", resp.status_code, body[:500])
+            resp.raise_for_status()
+        total = 0
+        async for chunk in resp.aiter_bytes(chunk_size=640):
+            total += len(chunk)
+            yield chunk
+        logger.info("Sarvam TTS stream (%s, %s): %d bytes total", lang_code, speaker, total)

@@ -285,6 +285,121 @@ class AIEngine:
         text = (completion.choices[0].message.content or "").strip()
         return text, 0.85
 
+    async def _call_groq_stream(
+        self,
+        system_prompt: str,
+        history: list[dict],
+        message: str,
+    ):
+        """Stream Groq chat completion, yielding sentences as they complete.
+
+        Yields text at sentence boundaries (. ! ?) so TTS can start on
+        the first sentence while the LLM generates the rest.
+        """
+        client = AsyncGroq(api_key=self.groq_api_key)
+
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history[-10:])
+        messages.append({"role": "user", "content": message})
+
+        stream = await client.chat.completions.create(
+            model=self.default_model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=150,
+            stream=True,
+        )
+
+        buffer = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            buffer += delta
+            # Yield complete sentences
+            while True:
+                best_idx = -1
+                for sep in [". ", "! ", "? ", ".\n", "!\n", "?\n"]:
+                    idx = buffer.find(sep)
+                    if idx != -1 and (best_idx == -1 or idx < best_idx):
+                        best_idx = idx
+                if best_idx != -1:
+                    sentence = buffer[: best_idx + 2].strip()
+                    buffer = buffer[best_idx + 2 :]
+                    if sentence:
+                        yield sentence
+                else:
+                    break
+        # Yield any remaining text
+        if buffer.strip():
+            yield buffer.strip()
+
+    # ------------------------------------------------------------------
+    # Streaming public API
+    # ------------------------------------------------------------------
+
+    async def process_message_stream(
+        self,
+        customer_message: str,
+        conversation_history: list[dict],
+        language: str = "en",
+    ):
+        """Like process_message but yields (sentence, metadata) tuples.
+
+        First checks keywords (escalation/hangup) and yields immediately.
+        Then streams LLM sentences as they're generated.
+
+        Yields: (sentence_text, AIResponse_or_None)
+            - For keyword matches: (text, AIResponse) — single yield
+            - For LLM sentences: (sentence, None) — multiple yields
+        """
+        # Check escalation keywords
+        keywords = self.ESCALATION_KEYWORDS_MR if language == "mr" else self.ESCALATION_KEYWORDS
+        message_lower = customer_message.lower()
+        for keyword in keywords:
+            if keyword in message_lower:
+                escalation_text = (
+                    "मला समजले की तुम्हाला मानवी एजंटशी बोलायचे आहे. मी तुम्हाला आता जोडतो."
+                    if language == "mr"
+                    else "I understand you'd like to speak with a human agent. Let me transfer you now."
+                )
+                yield escalation_text, AIResponse(
+                    text=escalation_text, confidence=1.0,
+                    should_escalate=True, escalation_reason=f"customer_requested: '{keyword}'",
+                )
+                return
+
+        # Check hangup keywords
+        hangup_kw = self.HANGUP_KEYWORDS_MR if language == "mr" else self.HANGUP_KEYWORDS
+        for keyword in hangup_kw:
+            if keyword in message_lower:
+                farewell_text = (
+                    "Demo Corp शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
+                    if language == "mr"
+                    else "Thank you for calling Demo Corp. Have a great day! Goodbye."
+                )
+                yield farewell_text, AIResponse(
+                    text=farewell_text, confidence=1.0,
+                    should_escalate=False, should_end_call=True,
+                )
+                return
+
+        # Stream from Groq
+        system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
+        if self.groq_api_key and _GROQ_AVAILABLE:
+            try:
+                async for sentence in self._call_groq_stream(
+                    system_prompt, conversation_history, customer_message
+                ):
+                    yield sentence, None
+            except Exception:
+                logger.exception("Groq streaming failed; using mock")
+                turn_count = len(conversation_history) // 2
+                resp = self._mock_response(customer_message, turn_count, language)
+                yield resp.text, resp
+        else:
+            turn_count = len(conversation_history) // 2
+            resp = self._mock_response(customer_message, turn_count, language)
+            yield resp.text, resp
+
     # ------------------------------------------------------------------
     # Mock fallback
     # ------------------------------------------------------------------
