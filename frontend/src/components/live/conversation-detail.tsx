@@ -247,7 +247,7 @@ export function ConversationDetail() {
         className="min-h-0 flex-1 overflow-y-auto"
         style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}
       >
-        {tab === 'messages' && <MessageThread conversationId={conversation.id} />}
+        {tab === 'messages' && <MessageThread conversationId={conversation.id} hideRecordings={!!conversation.recording_url} />}
         {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
         {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
         {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}

@@ -107,9 +107,9 @@ export function HistoryDetail({ conversationId }: HistoryDetailProps) {
       {/* Message thread */}
       <div className="rounded-xl ring-1 ring-foreground/10 bg-card overflow-hidden">
         <div className="px-4 py-2.5 border-b">
-          <p className="text-sm font-medium">Messages</p>
+          <p className="text-sm font-medium">Messages ({messages.length})</p>
         </div>
-        <div className="h-64 flex flex-col">
+        <div className="max-h-96 overflow-y-auto" data-scroll-container>
           <MessageThread conversationId={conversationId} />
         </div>
       </div>

@@ -52,7 +52,9 @@ def _conversation_to_dict(conv) -> dict:
         "current_handler_id": str(conv.current_handler_id) if conv.current_handler_id else None,
         "lead_id": str(conv.lead_id) if conv.lead_id else None,
         "campaign_lead_id": str(conv.campaign_lead_id) if conv.campaign_lead_id else None,
+        "queue_entered_at": conv.queue_entered_at.isoformat() if getattr(conv, "queue_entered_at", None) else None,
         "queue_priority": conv.queue_priority,
+        "required_skills": getattr(conv, "required_skills", None),
         "started_at": conv.started_at.isoformat() if conv.started_at else None,
         "answered_at": conv.answered_at.isoformat() if conv.answered_at else None,
         "ended_at": conv.ended_at.isoformat() if conv.ended_at else None,
@@ -64,6 +66,7 @@ def _conversation_to_dict(conv) -> dict:
         "recording_url": conv.recording_url,
         "context": conv.context,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "updated_at": conv.updated_at.isoformat() if getattr(conv, "updated_at", None) else None,
     }
 
 
@@ -92,11 +95,14 @@ def _message_to_dict(msg) -> dict:
     return {
         "id": str(msg.id),
         "conversation_id": str(msg.conversation_id),
+        "tenant_id": str(msg.tenant_id),
         "sender_type": msg.sender_type,
         "sender_id": str(msg.sender_id) if msg.sender_id else None,
         "content_type": msg.content_type,
         "content": msg.content,
         "metadata": msg.metadata_,
+        "email_message_id": getattr(msg, "email_message_id", None),
+        "email_subject": getattr(msg, "email_subject", None),
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
     }
 
@@ -113,6 +119,7 @@ def _handoff_event_to_dict(evt) -> dict:
         "from_state": evt.from_state,
         "to_state": evt.to_state,
         "reason": evt.reason,
+        "context_snapshot": evt.context_snapshot,
         "metadata": evt.metadata_,
         "created_at": evt.created_at.isoformat() if evt.created_at else None,
     }

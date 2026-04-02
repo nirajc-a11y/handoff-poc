@@ -4,10 +4,15 @@ import { cn, formatTime } from '@/lib/utils'
 
 interface MessageThreadProps {
   conversationId: string
+  /** Hide system audio messages (e.g. full-call recording already shown in header) */
+  hideRecordings?: boolean
 }
 
-export function MessageThread({ conversationId }: MessageThreadProps) {
-  const { data: messages = [] } = useMessages(conversationId)
+export function MessageThread({ conversationId, hideRecordings }: MessageThreadProps) {
+  const { data: raw = [] } = useMessages(conversationId)
+  const messages = hideRecordings
+    ? raw.filter((m) => !(m.content_type === 'audio' && (m.sender_type === 'system' || m.sender_type === 'ivr')))
+    : raw
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
