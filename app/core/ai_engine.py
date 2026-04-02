@@ -59,6 +59,7 @@ class AIResponse:
     text: str
     confidence: float  # 0.0 to 1.0
     should_escalate: bool
+    should_end_call: bool = False
     escalation_reason: str | None = None
 
 
@@ -82,6 +83,35 @@ class AIEngine:
         "कोणाशी बोलायचं",
         "तक्रार",
         "व्यवस्थापक",
+    }
+
+    HANGUP_KEYWORDS: set[str] = {
+        "bye",
+        "goodbye",
+        "good bye",
+        "hang up",
+        "end call",
+        "that's all",
+        "that is all",
+        "no thanks bye",
+        "nothing else",
+        "i'm done",
+        "no more questions",
+        "thanks bye",
+        "thank you bye",
+        "ok bye",
+        "okay bye",
+    }
+
+    HANGUP_KEYWORDS_MR: set[str] = {
+        "बाय",
+        "धन्यवाद बाय",
+        "बस्स",
+        "एवढंच",
+        "काही नाही",
+        "ठेवतो",
+        "ठेवते",
+        "फोन ठेवा",
     }
 
     def __init__(self) -> None:
@@ -172,6 +202,22 @@ class AIEngine:
                     confidence=1.0,
                     should_escalate=True,
                     escalation_reason=f"customer_requested: '{keyword}'",
+                )
+
+        # 1b. Check for hangup / goodbye keywords
+        hangup_kw = self.HANGUP_KEYWORDS_MR if language == "mr" else self.HANGUP_KEYWORDS
+        for keyword in hangup_kw:
+            if keyword in message_lower:
+                farewell_text = (
+                    "Demo Corp शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
+                    if language == "mr"
+                    else "Thank you for calling Demo Corp. Have a great day! Goodbye."
+                )
+                return AIResponse(
+                    text=farewell_text,
+                    confidence=1.0,
+                    should_escalate=False,
+                    should_end_call=True,
                 )
 
         # 2. Determine turn count (each user+assistant pair counts as one turn)

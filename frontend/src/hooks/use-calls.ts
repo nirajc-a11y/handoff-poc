@@ -16,6 +16,7 @@ export function useCallAction(conversationId: string) {
     hold: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/hold`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
     unhold: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/unhold`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
     end: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/end`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
+    forceEnd: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/force-end`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
     answer: useMutation({ mutationFn: () => api.post(`/calls/${conversationId}/answer`), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversations'] }) }),
   }
 }

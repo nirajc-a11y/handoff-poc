@@ -33,8 +33,10 @@ const VOICE_AI_MODES = [
 ] as const
 
 const SARVAM_SPEAKERS = [
-  { value: 'meera', label: 'Meera (Female)' },
-  { value: 'arvind', label: 'Arvind (Male)' },
+  { value: 'ritu', label: 'Ritu (Female)' },
+  { value: 'aditya', label: 'Aditya (Male)' },
+  { value: 'priya', label: 'Priya (Female)' },
+  { value: 'rahul', label: 'Rahul (Male)' },
 ] as const
 
 export function AIConfig() {
@@ -46,7 +48,7 @@ export function AIConfig() {
   })
 
   const [voiceAiMode, setVoiceAiMode] = useState<'plivo' | 'livekit'>('plivo')
-  const [sarvamSpeaker, setSarvamSpeaker] = useState<'meera' | 'arvind'>('meera')
+  const [sarvamSpeaker, setSarvamSpeaker] = useState<string>('ritu')
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7)
   const [groqModel, setGroqModel] = useState('llama3-8b-8192')
   const [systemPrompt, setSystemPrompt] = useState('')
@@ -59,7 +61,8 @@ export function AIConfig() {
       if (cfg.voice_ai_mode === 'plivo' || cfg.voice_ai_mode === 'livekit') {
         setVoiceAiMode(cfg.voice_ai_mode)
       }
-      if (cfg.sarvam_speaker === 'meera' || cfg.sarvam_speaker === 'arvind') {
+      const validSpeakers = SARVAM_SPEAKERS.map(s => s.value) as readonly string[]
+      if (typeof cfg.sarvam_speaker === 'string' && validSpeakers.includes(cfg.sarvam_speaker)) {
         setSarvamSpeaker(cfg.sarvam_speaker)
       }
       if (typeof cfg.ai_confidence_threshold === 'number') {
@@ -178,7 +181,7 @@ export function AIConfig() {
                       name="sarvam_speaker"
                       value={spk.value}
                       checked={sarvamSpeaker === spk.value}
-                      onChange={(e) => setSarvamSpeaker(e.target.value as 'meera' | 'arvind')}
+                      onChange={(e) => setSarvamSpeaker(e.target.value)}
                       className="accent-primary"
                     />
                     <span className="text-sm">{spk.label}</span>

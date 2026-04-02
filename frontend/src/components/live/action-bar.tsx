@@ -5,6 +5,7 @@ import {
   ArrowRightLeft,
   ArrowUp,
   PhoneOff,
+  PhoneMissed,
   ClipboardCheck,
 } from 'lucide-react'
 import type { Conversation } from '@/lib/types'
@@ -34,6 +35,7 @@ export function ActionBar({ conversation }: ActionBarProps) {
   const isEnded = conversation.state === 'ended' || conversation.state === 'failed'
   const isOnHold = conversation.state === 'on_hold'
   const isHumanHandling = conversation.current_handler_type === 'human'
+  const canForceEnd = ['ivr', 'ai_handling', 'queued_for_human', 'on_hold'].includes(conversation.state)
 
   const handleHold = async () => {
     try {
@@ -59,6 +61,15 @@ export function ActionBar({ conversation }: ActionBarProps) {
       toast.success('Call ended')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'End call failed')
+    }
+  }
+
+  const handleForceEnd = async () => {
+    try {
+      await actions.forceEnd.mutateAsync()
+      toast.success('Call marked as ended')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Force end failed')
     }
   }
 
@@ -155,6 +166,24 @@ export function ActionBar({ conversation }: ActionBarProps) {
           </TooltipTrigger>
           <TooltipContent>Disposition</TooltipContent>
         </Tooltip>
+
+        {canForceEnd && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  className="text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+                  onClick={handleForceEnd}
+                />
+              }
+            >
+              <PhoneMissed className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipContent>Mark as Ended</TooltipContent>
+          </Tooltip>
+        )}
 
         <Tooltip>
           <TooltipTrigger

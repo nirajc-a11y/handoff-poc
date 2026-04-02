@@ -2,6 +2,9 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
+# Ensure application logs are visible in the terminal
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 

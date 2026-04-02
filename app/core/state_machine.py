@@ -76,17 +76,25 @@ TRANSITIONS: Dict[
     # -- IVR routing --
     (ConversationState.IVR, Trigger.DTMF_AI): (ConversationState.AI_HANDLING, "ivr_to_ai"),
     (ConversationState.IVR, Trigger.DTMF_HUMAN): (ConversationState.QUEUED_FOR_HUMAN, "ivr_to_human"),
+    (ConversationState.IVR, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.IVR, Trigger.AGENT_END): (ConversationState.WRAP_UP, "state_change"),
     # -- AI handling --
     (ConversationState.AI_HANDLING, Trigger.AI_CONFIDENCE_DROP): (ConversationState.QUEUED_FOR_HUMAN, "ai_confidence_drop"),
     (ConversationState.AI_HANDLING, Trigger.CUSTOMER_ESCALATION): (ConversationState.QUEUED_FOR_HUMAN, "customer_escalation"),
     (ConversationState.AI_HANDLING, Trigger.AI_RESOLVED): (ConversationState.WRAP_UP, "state_change"),
     (ConversationState.AI_HANDLING, Trigger.AI_TRANSFER): (ConversationState.QUEUED_FOR_HUMAN, "ai_to_human"),
+    (ConversationState.AI_HANDLING, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.AI_HANDLING, Trigger.AGENT_END): (ConversationState.WRAP_UP, "state_change"),
     # -- Queue --
     (ConversationState.QUEUED_FOR_HUMAN, Trigger.AGENT_ASSIGNED): (ConversationState.HUMAN_HANDLING, "handler_change"),
     (ConversationState.QUEUED_FOR_HUMAN, Trigger.QUEUE_TIMEOUT): (ConversationState.ENDED, "state_change"),
+    (ConversationState.QUEUED_FOR_HUMAN, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.QUEUED_FOR_HUMAN, Trigger.AGENT_END): (ConversationState.WRAP_UP, "state_change"),
     # -- Human handling / hold --
     (ConversationState.HUMAN_HANDLING, Trigger.AGENT_HOLD): (ConversationState.ON_HOLD, "hold_started"),
     (ConversationState.ON_HOLD, Trigger.AGENT_UNHOLD): (ConversationState.HUMAN_HANDLING, "hold_ended"),
+    (ConversationState.ON_HOLD, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.ON_HOLD, Trigger.AGENT_END): (ConversationState.WRAP_UP, "state_change"),
     # -- Transfers --
     (ConversationState.HUMAN_HANDLING, Trigger.COLD_TRANSFER): (ConversationState.TRANSFERRED, "human_to_human_cold"),
     (ConversationState.HUMAN_HANDLING, Trigger.WARM_TRANSFER): (ConversationState.TRANSFERRED, "human_to_human_warm"),

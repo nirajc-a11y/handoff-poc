@@ -1,17 +1,16 @@
-import { useState, useEffect } from 'react'
-import { useAtomValue } from 'jotai'
-import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Bot, Headphones, GitBranch, Copy, Check } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { useAtomValue, useSetAtom } from 'jotai'
+import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Bot, Headphones, GitBranch, Copy, Check, X } from 'lucide-react'
 import { selectedConvIdAtom } from '@/stores/ui'
 import { useConversation } from '@/hooks/use-conversations'
 import { cn, stateColors, channelIcons, formatDuration, timeSince } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { MessageThread } from './message-thread'
 import { MessageInput } from './message-input'
 import { TranscriptPanel } from './transcript-panel'
 import { ActionBar } from './action-bar'
-// State flow steps in order
+
 const FLOW_STEPS = [
   { key: 'initiated', label: 'Initiated', icon: Phone },
   { key: 'ringing', label: 'Ringing', icon: PhoneOutgoing },
@@ -89,7 +88,10 @@ function LiveTimer({ startedAt, endedAt }: { startedAt: string; endedAt: string 
 
 export function ConversationDetail() {
   const selectedId = useAtomValue(selectedConvIdAtom)
+  const setSelectedId = useSetAtom(selectedConvIdAtom)
   const { data: conversation, isLoading } = useConversation(selectedId)
+  const [tab, setTab] = useState<'messages' | 'transcript'>('messages')
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   if (!selectedId) {
     return (
@@ -159,6 +161,13 @@ export function ConversationDetail() {
             <Badge variant="secondary" className={cn('h-5 text-[10px]', stateClass)}>
               {conversation.state.replace(/_/g, ' ')}
             </Badge>
+            <button
+              onClick={() => setSelectedId(null)}
+              className="ml-1 rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+              aria-label="Close panel"
+            >
+              <X className="size-4" />
+            </button>
           </div>
         </div>
 
@@ -198,29 +207,47 @@ export function ConversationDetail() {
         </div>
       </div>
 
-      {/* Tabs: Messages / Transcript */}
-      <Tabs defaultValue="messages" className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="shrink-0 border-b border-gray-100 px-4 pt-1">
-          <TabsList variant="line">
-            <TabsTrigger value="messages" className="text-xs">Messages</TabsTrigger>
-            <TabsTrigger value="transcript" className="text-xs">Transcript</TabsTrigger>
-          </TabsList>
-        </div>
+      {/* Tab bar */}
+      <div className="shrink-0 flex gap-1 border-b border-gray-100 px-4 pt-1">
+        {(['messages', 'transcript'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={cn(
+              'px-2 py-1.5 text-xs font-medium capitalize transition-colors border-b-2 -mb-px',
+              tab === t
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            {t === 'messages' ? 'Messages' : 'Transcript'}
+          </button>
+        ))}
+      </div>
 
-        <TabsContent value="messages" className="flex min-h-0 flex-1 flex-col overflow-hidden m-0 p-0">
+      {/* Scrollable content area */}
+      <div
+        ref={scrollRef}
+        data-scroll-container
+        className="min-h-0 flex-1 overflow-y-auto"
+        style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}
+      >
+        {tab === 'messages' ? (
           <MessageThread conversationId={conversation.id} />
-          <MessageInput conversationId={conversation.id} channel={conversation.channel} />
-        </TabsContent>
-
-        <TabsContent value="transcript" className="flex min-h-0 flex-1 flex-col overflow-hidden m-0 p-0">
+        ) : (
           <TranscriptPanel conversationId={conversation.id} />
-        </TabsContent>
-      </Tabs>
+        )}
+      </div>
+
+      {/* Message input (only on messages tab) */}
+      {tab === 'messages' && (
+        <div className="shrink-0">
+          <MessageInput conversationId={conversation.id} channel={conversation.channel} />
+        </div>
+      )}
 
       {/* Action bar */}
-      <div className="shrink-0">
-        <ActionBar conversation={conversation} />
-      </div>
+      <ActionBar conversation={conversation} />
     </div>
   )
 }

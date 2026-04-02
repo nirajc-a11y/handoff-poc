@@ -1,6 +1,5 @@
 import { useMessages } from '@/hooks/use-messages'
 import { formatTime } from '@/lib/utils'
-import { ScrollArea } from '@/components/ui/scroll-area'
 
 interface TranscriptPanelProps {
   conversationId: string
@@ -13,16 +12,15 @@ export function TranscriptPanel({ conversationId }: TranscriptPanelProps) {
 
   if (transcript.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center">
+      <div className="flex h-full items-center justify-center">
         <p className="text-xs text-gray-400">No transcript available</p>
       </div>
     )
   }
 
   return (
-    <ScrollArea className="flex-1">
-      <div className="flex flex-col gap-2 p-4">
-        {transcript.map((msg) => {
+    <div className="flex flex-col gap-2 p-4">
+      {transcript.map((msg) => {
           const isCustomer = msg.sender_type === 'customer'
           const isAi = msg.sender_type === 'ai'
           const isAgent = msg.sender_type === 'agent'
@@ -59,7 +57,6 @@ export function TranscriptPanel({ conversationId }: TranscriptPanelProps) {
             </div>
           )
         })}
-      </div>
-    </ScrollArea>
+    </div>
   )
 }

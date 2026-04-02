@@ -12,7 +12,6 @@ import { AgentsPage } from '@/pages/agents'
 import { HistoryPage } from '@/pages/history'
 import { IVRPage } from '@/pages/ivr'
 import { SettingsPage } from '@/pages/settings'
-import { SoftphonePanel } from '@/components/softphone/softphone-panel'
 
 function PagePlaceholder({ name }: { name: string }) {
   return (
@@ -73,7 +72,6 @@ export function AppShell() {
           )}
         </main>
       </div>
-      <SoftphonePanel />
     </div>
   )
 }

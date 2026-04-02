@@ -44,17 +44,16 @@ def _abs(path: str) -> str:
     return f"{_BASE}{path}"
 
 
-# Plivo Polly neural voices — most natural sounding
-# Kajal: Indian English, female, neural — the best for Indian accent
-# Aditi: Hindi/Indian female — for Marathi (closest available)
-def _speak(text: str, language: str = "en") -> str:
-    """Generate a plain <Speak> tag — no voice attribute, no SSML.
+# Plivo language codes for <Speak> — improves pronunciation for Indian languages.
+# Uses built-in WOMAN voice (always available, no Polly addon needed).
+_PLIVO_LANG = {"en": "en-IN", "hi": "hi-IN", "mr": "hi-IN"}
 
-    Matching the working pattern from angel-tel-routing which uses
-    bare <Speak> with Plivo's default voice.
-    """
+
+def _speak(text: str, language: str = "en") -> str:
+    """Generate a <Speak> tag with Indian English voice."""
+    lang_code = _PLIVO_LANG.get(language, "en-IN")
     escaped = _escape_xml(text)
-    return f'<Speak>{escaped}</Speak>'
+    return f'<Speak voice="WOMAN" language="{lang_code}">{escaped}</Speak>'
 
 
 def xml_response(xml: str) -> Response:
@@ -191,7 +190,7 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
     if not tenant_id:
         logger.warning("Plivo /answer called without tenant_id")
         return xml_response(
-            "<Response><Speak>System error. Please try again later.</Speak></Response>"
+            f"<Response>{_speak('System error. Please try again later.')}</Response>"
         )
 
     try:
@@ -269,8 +268,7 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
         logger.exception("Error in plivo_answer")
         await db.rollback()
         return xml_response(
-            "<Response><Speak>Sorry, we are experiencing technical difficulties. "
-            "Please try again later.</Speak></Response>"
+            f"<Response>{_speak('Sorry, we are experiencing technical difficulties. Please try again later.')}</Response>"
         )
 
 
@@ -289,7 +287,7 @@ async def plivo_dtmf(request: Request, db: AsyncSession = Depends(get_db)):
 
     if not tenant_id or not conv_id:
         return xml_response(
-            "<Response><Speak>System error. Goodbye.</Speak></Response>"
+            f"<Response>{_speak('System error. Goodbye.')}</Response>"
         )
 
     try:
@@ -361,7 +359,7 @@ async def plivo_dtmf(request: Request, db: AsyncSession = Depends(get_db)):
         logger.exception("Error in plivo_dtmf")
         await db.rollback()
         return xml_response(
-            "<Response><Speak>Sorry, an error occurred. Please try again later.</Speak></Response>"
+            f"<Response>{_speak('Sorry, an error occurred. Please try again later.')}</Response>"
         )
 
 
@@ -396,19 +394,39 @@ async def _handle_ai_handoff(
     )
     tenant_config = tenant_result.scalar_one_or_none() or {}
     voice_mode = tenant_config.get("voice_ai_mode", "plivo")
+    sarvam_speaker = tenant_config.get("sarvam_speaker", "ritu")
+    print(f"\n>>> AI HANDOFF: voice_mode={voice_mode}, lang={lang}, speaker={sarvam_speaker}, sarvam_key={'SET' if settings.sarvam_api_key else 'EMPTY'}")
+
+    if voice_mode == "livekit" and not settings.sarvam_api_key:
+        logger.error(
+            "LiveKit/Sarvam mode selected for tenant %s but SARVAM_API_KEY is empty — falling back to Plivo mode",
+            tenant_id,
+        )
+        voice_mode = "plivo"
 
     if voice_mode == "livekit":
         # Mode B: Real-time AI via Plivo <Stream> + Sarvam
+        # Speak a greeting via Plivo native TTS first so the caller always hears something,
+        # even if Sarvam TTS is slow or misconfigured.
+        greeting_text = (
+            action.target_config.get("greeting", "")
+            if action.target_config
+            else ""
+        ) or "You are now connected to our AI assistant. How can I help you today?"
+        s_greet = _speak(greeting_text, language=lang)
+
         stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
         stream_url = (
             f"{stream_ws_url}/api/v1/plivo/audio-stream"
-            f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}"
+            f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"
+            f"&skip_greeting=true"
         )
+        escaped_url = _escape_xml(stream_url)
         xml = f"""<Response>
-    <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">
-        {_escape_xml(stream_url)}
-    </Stream>
+    {s_greet}
+    <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">{escaped_url}</Stream>
 </Response>"""
+        print(f">>> LIVEKIT XML:\n{xml}")
         return xml_response(xml)
 
     # Mode A (default): Record + transcribe + LLM + Plivo TTS
@@ -1048,8 +1066,5 @@ async def plivo_call_status(
 async def plivo_fallback(request: Request):
     """Fallback URL -- Plivo calls this if the answer_url fails."""
     return xml_response(
-        "<Response>"
-        "<Speak>Sorry, we are experiencing technical difficulties. "
-        "Please try again later.</Speak>"
-        "</Response>"
+        f"<Response>{_speak('Sorry, we are experiencing technical difficulties. Please try again later.')}</Response>"
     )

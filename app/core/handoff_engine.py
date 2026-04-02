@@ -512,6 +512,21 @@ class HandoffEngine:
         metadata: dict,
     ) -> None:
         """Move conversation into wrap-up / disposition phase."""
+        # Hang up the actual phone call via the telephony provider
+        if conversation.channel == "voice":
+            try:
+                provider = await self._provider_registry.get_telephony(
+                    conversation.tenant_id, db,
+                )
+                session_id = self._get_provider_session_id(conversation)
+                if provider and session_id:
+                    await provider.end_call(session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to hang up call via provider (conversation %s)",
+                    conversation.id,
+                )
+
         # Release the agent so they can take new conversations while filling
         # out the disposition form.
         prev_agent_id = conversation.current_handler_id

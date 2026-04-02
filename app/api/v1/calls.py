@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.handoff_engine import ConversationNotFoundError, handoff_engine
-from app.core.state_machine import StateMachineError, Trigger
+from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.models.lead import Lead
 from app.db.models.user import AgentProfile
 from app.dependencies import get_current_user_id, get_db, get_tenant_id
@@ -312,12 +312,55 @@ async def end_call(
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
 ) -> dict:
-    """Agent ends the call, moving to wrap-up."""
+    """Agent ends the call — moves through wrap-up to ended."""
+    try:
+        conversation = await call_service.get_call(db=db, tenant_id=tenant_id, conversation_id=conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Call not found")
+        # If already ENDED, nothing to do
+        if conversation.state == ConversationState.ENDED:
+            return _conversation_to_dict(conversation)
+        # If already in WRAP_UP (e.g. AI resolved / customer disconnected), skip AGENT_END
+        if conversation.state != ConversationState.WRAP_UP:
+            conversation = await handoff_engine.process_trigger(
+                db=db,
+                conversation_id=conversation_id,
+                trigger=Trigger.AGENT_END,
+            )
+        # Complete wrap-up so the call is fully ended
+        conversation = await handoff_engine.process_trigger(
+            db=db,
+            conversation_id=conversation_id,
+            trigger=Trigger.DISPOSITION_SUBMITTED,
+            metadata={"disposition": "ended_by_agent"},
+        )
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StateMachineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _conversation_to_dict(conversation)
+
+
+@router.post("/{conversation_id}/force-end")
+async def force_end_call(
+    conversation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+) -> dict:
+    """Force-end a stuck call (e.g. customer hung up during IVR/AI)."""
     try:
         conversation = await handoff_engine.process_trigger(
             db=db,
             conversation_id=conversation_id,
-            trigger=Trigger.AGENT_END,
+            trigger=Trigger.CUSTOMER_DISCONNECT,
+        )
+        # Auto-complete wrap-up so the call is fully ended
+        conversation = await handoff_engine.process_trigger(
+            db=db,
+            conversation_id=conversation_id,
+            trigger=Trigger.DISPOSITION_SUBMITTED,
+            metadata={"disposition": "customer_disconnected"},
         )
     except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

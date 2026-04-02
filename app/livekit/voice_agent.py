@@ -16,6 +16,8 @@ import uuid
 import wave
 from datetime import datetime, timezone
 
+import httpx
+
 from app.config import settings
 from app.core.ai_engine import ai_engine
 from app.livekit import sarvam
@@ -52,7 +54,7 @@ def _wav_to_mulaw(wav_data: bytes) -> bytes:
 class VoiceAISession:
     """One AI conversation session for a phone call."""
 
-    def __init__(self, tenant_id: str, conv_id: str, language: str = "en", speaker: str = "meera"):
+    def __init__(self, tenant_id: str, conv_id: str, language: str = "en", speaker: str = "ritu"):
         self.tenant_id = tenant_id
         self.conv_id = conv_id
         self.language = language
@@ -64,9 +66,10 @@ class VoiceAISession:
         self.is_speaking = False
         self._greeting_sent = False
         self.should_escalate = False
+        self.should_end_call = False
 
-        # Silence detection (mulaw 8kHz)
-        self.silence_threshold = 10
+        # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
+        self.silence_threshold = 200  # RMS below this = silence (16-bit PCM scale)
         self.silence_duration_frames = 24000  # ~3 seconds
         self.min_speech_frames = 4000  # ~0.5 seconds
 
@@ -75,8 +78,15 @@ class VoiceAISession:
         if self.is_speaking:
             return False
         self.audio_buffer.extend(mulaw_chunk)
-        avg_energy = sum(abs(b - 128) for b in mulaw_chunk) / max(len(mulaw_chunk), 1)
-        if avg_energy < self.silence_threshold:
+        # Convert mulaw to linear PCM to get proper energy measurement.
+        # Raw mulaw bytes don't have a linear relationship to amplitude
+        # (silence = 0xFF, not 0x80), so we must decode first.
+        pcm = audioop.ulaw2lin(mulaw_chunk, 2)
+        rms_energy = audioop.rms(pcm, 2)
+        # Debug: log energy every ~1 second (50 chunks of 160 bytes at 8kHz = 1s)
+        if len(self.audio_buffer) % 8000 < len(mulaw_chunk):
+            print(f">>> AUDIO rms={rms_energy}, buffer={len(self.audio_buffer)}, silence_frames={self.silence_frames}")
+        if rms_energy < self.silence_threshold:
             self.silence_frames += len(mulaw_chunk)
         else:
             self.silence_frames = 0
@@ -129,6 +139,7 @@ class VoiceAISession:
                 })
 
             self.should_escalate = ai_response.should_escalate
+            self.should_end_call = ai_response.should_end_call
 
             # TTS
             tts_audio = await sarvam.synthesize(ai_response.text, self.language, self.speaker)
@@ -136,8 +147,15 @@ class VoiceAISession:
             self.is_speaking = False
             return mulaw_audio
 
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Sarvam API call failed in turn %d (HTTP %d): %s. Check SARVAM_API_KEY.",
+                self.turn_count, exc.response.status_code, exc.response.text[:200],
+            )
+            self.is_speaking = False
+            return None
         except Exception:
-            logger.exception("Error in voice AI turn %d", self.turn_count)
+            logger.exception("Unexpected error in voice AI turn %d", self.turn_count)
             self.is_speaking = False
             return None
 
@@ -153,9 +171,17 @@ class VoiceAISession:
         )
         try:
             tts_audio = await sarvam.synthesize(greeting, self.language, self.speaker)
-            return _wav_to_mulaw(tts_audio)
+            mulaw_audio = _wav_to_mulaw(tts_audio)
+            logger.info("Greeting audio generated: %d bytes WAV -> %d bytes mulaw", len(tts_audio), len(mulaw_audio))
+            return mulaw_audio
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Sarvam TTS greeting failed (HTTP %d): %s. Check SARVAM_API_KEY.",
+                exc.response.status_code, exc.response.text[:200],
+            )
+            return None
         except Exception:
-            logger.exception("Failed to generate greeting")
+            logger.exception("Unexpected error generating greeting audio")
             return None
 
     async def _save_message(self, db, sender_type: str, content: str, metadata: dict):
