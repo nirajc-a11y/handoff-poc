@@ -33,7 +33,18 @@ export function usePlivo() {
     document.head.appendChild(script)
   }, [])
 
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [])
+
   const startTimer = useCallback(() => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
     setState(s => ({ ...s, callDuration: 0 }))
     timerRef.current = setInterval(() => {
       setState(s => ({ ...s, callDuration: s.callDuration + 1 }))
@@ -78,8 +89,9 @@ export function usePlivo() {
 
   const logout = useCallback(() => {
     plivoRef.current?.client?.logout()
+    stopTimer()
     setState(s => ({ ...s, isRegistered: false }))
-  }, [])
+  }, [stopTimer])
 
   const answer = useCallback(() => plivoRef.current?.client?.answer(), [])
 

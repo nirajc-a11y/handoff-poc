@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import DOMPurify from 'dompurify'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { Phone, PhoneIncoming, PhoneOutgoing, Clock, Bot, Headphones, GitBranch, Copy, Check, X } from 'lucide-react'
 import { selectedConvIdAtom } from '@/stores/ui'
@@ -342,7 +343,7 @@ function EmailThreadPanel({ conversationId }: { conversationId: string }) {
           </div>
           <div
             className="text-xs text-gray-600 prose prose-xs max-w-none"
-            dangerouslySetInnerHTML={{ __html: msg.content ?? '' }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(msg.content ?? '') }}
           />
         </div>
       ))}

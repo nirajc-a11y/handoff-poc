@@ -217,6 +217,14 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
         )
 
     try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        logger.warning("Plivo /answer called with invalid tenant_id: %s", tenant_id)
+        return xml_response(
+            f"<Response>{_speak('System error. Please try again later.')}</Response>"
+        )
+
+    try:
         # Find or create the conversation
         conversation = await _find_or_create_conversation(
             db,
@@ -258,7 +266,6 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
             conversation = result.scalar_one()
 
         # Load the IVR menu for this tenant
-        tenant_uuid = uuid.UUID(tenant_id)
         try:
             prompt, menu_id = await ivr_engine.get_menu_prompt(
                 db, tenant_id=tenant_uuid

@@ -22,7 +22,12 @@ export class WebSocketManager {
     this.ws = new WebSocket(this.url)
     this.ws.onopen = () => { this.reconnectDelay = 1000; this.onStatusChange?.(true) }
     this.ws.onmessage = (e) => {
-      try { const data: WSEvent = JSON.parse(e.data as string); this.handlers.forEach(h => h(data)) } catch { /* ignore parse errors */ }
+      try {
+        const data: WSEvent = JSON.parse(e.data as string)
+        this.handlers.forEach(h => h(data))
+      } catch (err) {
+        console.warn('[ws] Failed to parse message:', err, e.data)
+      }
     }
     this.ws.onclose = () => { this.onStatusChange?.(false); this._scheduleReconnect() }
     this.ws.onerror = () => this.ws?.close()

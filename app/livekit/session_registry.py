@@ -31,7 +31,7 @@ class SessionHandle:
             source: 'caller' or 'ai' — so the frontend can mix/label.
         """
         dead: list[asyncio.Queue] = []
-        for q in self.listeners:
+        for q in list(self.listeners):
             try:
                 q.put_nowait({"source": source, "audio": audio_bytes})
             except asyncio.QueueFull:

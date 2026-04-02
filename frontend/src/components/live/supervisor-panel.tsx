@@ -21,7 +21,7 @@ export function SupervisorPanel({ conversationId, isActive }: SupervisorPanelPro
     if (!isActive && listen.isListening) {
       listen.stopListening()
     }
-  }, [isActive])
+  }, [isActive, listen.isListening, listen.stopListening])
 
   const disabled = !isActive
 

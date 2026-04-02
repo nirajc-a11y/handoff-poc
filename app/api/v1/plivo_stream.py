@@ -325,7 +325,11 @@ async def plivo_audio_stream(
 
     try:
         while True:
-            data = await ws.receive_text()
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=60.0)
+            except asyncio.TimeoutError:
+                logger.warning("Plivo stream timeout (60s no data): conv=%s", conv_id)
+                break
             msg = json.loads(data)
             event_type = msg.get("event", "")
 

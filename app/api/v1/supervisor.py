@@ -17,9 +17,10 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.core.handoff_engine import handoff_engine
-from app.core.state_machine import Trigger
+from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
+from app.db.models.conversation import Conversation
 from app.livekit import session_registry
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,20 @@ async def supervisor_barge(conv_id: str):
 
     session = handle.session
 
+    # 0. Verify conversation is in AI_HANDLING state
+    # NOTE: TOCTOU — state may change between this check and the transitions below,
+    # but process_trigger() will raise StateMachineError if so (caught below).
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(Conversation.state).where(Conversation.id == _uuid.UUID(conv_id))
+        )
+        current_state = result.scalar_one_or_none()
+        if current_state != ConversationState.AI_HANDLING.value:
+            raise HTTPException(
+                409,
+                f"Barge requires AI_HANDLING state, but conversation is in '{current_state}'"
+            )
+
     # 1. Cancel AI pipeline
     session._barge_in_event.set()
     session.finish_speaking()
@@ -150,11 +165,8 @@ async def supervisor_barge(conv_id: str):
                     trigger=trigger,
                     metadata={"reason": "Supervisor barge-in", "handler": "supervisor"},
                 )
-            except Exception as exc:
-                if "not allowed in state" in str(exc):
-                    logger.info("Barge: skipping %s for conv=%s (already transitioned)", trigger.value, conv_id)
-                else:
-                    raise
+            except StateMachineError:
+                logger.info("Barge: skipping %s for conv=%s (already transitioned)", trigger.value, conv_id)
         await db.commit()
 
         # 4. Redirect Plivo call to conference
