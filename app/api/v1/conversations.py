@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -212,6 +212,47 @@ async def create_message(
         sender_type=body.sender_type,
         content=body.content,
         content_type=body.content_type,
+        sender_id=user_id,
+    )
+    return _message_to_dict(message)
+
+
+@router.post("/{conversation_id}/audio-message")
+async def upload_audio_message(
+    conversation_id: UUID,
+    file: UploadFile,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user_id: UUID = Depends(get_current_user_id),
+) -> dict:
+    """Upload a browser-recorded audio file and save as a message."""
+    import os
+
+    conversation = await conversation_service.get_conversation(db=db, tenant_id=tenant_id, conversation_id=conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    ext = file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "webm"
+    filename = f"{conversation_id}_agent_{timestamp}.{ext}"
+    filepath = os.path.join(recordings_dir, filename)
+
+    content = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    recording_path = f"/recordings/{filename}"
+    message = await message_service.create_message(
+        db=db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        sender_type="agent",
+        content=recording_path,
+        content_type="audio",
         sender_id=user_id,
     )
     return _message_to_dict(message)
