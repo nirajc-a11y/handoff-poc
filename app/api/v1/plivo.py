@@ -84,6 +84,7 @@ async def _start_call_recording(tenant_id: str, call_uuid: str, conv_id: str):
         await asyncio.to_thread(
             lambda: client.calls.record(
                 call_uuid,
+                time_limit=3600,
                 file_format="mp3",
                 callback_url=recording_cb,
                 callback_method="POST",

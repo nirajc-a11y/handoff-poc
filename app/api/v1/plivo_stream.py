@@ -201,7 +201,15 @@ async def plivo_audio_stream(
                 stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
                 logger.info("Stream started: sid=%s", stream_sid)
                 if greeting_audio:
+                    session.is_speaking = True
                     await send_audio(greeting_audio)
+                    # Wait for Plivo to finish playing greeting before listening
+                    playback_secs = len(greeting_audio) / 8000
+                    send_secs = (len(greeting_audio) // 320 + 1) * 0.018
+                    remaining = playback_secs - send_secs
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    session.finish_speaking()
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")
