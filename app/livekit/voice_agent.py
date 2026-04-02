@@ -67,15 +67,20 @@ class VoiceAISession:
         self._greeting_sent = False
         self.should_escalate = False
         self.should_end_call = False
+        self._cooldown_remaining = 0
 
         # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
         self.silence_threshold = 200  # RMS below this = silence (16-bit PCM scale)
-        self.silence_duration_frames = 12000  # ~1.5 seconds (was 3s — too slow)
+        self.silence_duration_frames = 12000  # ~1.5 seconds
         self.min_speech_frames = 3200  # ~0.4 seconds
 
     def add_audio(self, mulaw_chunk: bytes) -> bool:
         """Add audio chunk. Returns True if speech pause detected."""
         if self.is_speaking:
+            return False
+        # Post-TTS cooldown: skip audio to let echo die down
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= len(mulaw_chunk)
             return False
         self.audio_buffer.extend(mulaw_chunk)
         # Convert mulaw to linear PCM to get proper energy measurement.
@@ -158,7 +163,7 @@ class VoiceAISession:
                     tts_text = tts_text[:cut + 1]
                 else:
                     tts_text = tts_text[:300]
-            tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker, pace=1.15)
+            tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker)
             mulaw_audio = _wav_to_mulaw(tts_audio)
             # NOTE: is_speaking stays True — caller must call finish_speaking()
             return mulaw_audio
@@ -176,10 +181,13 @@ class VoiceAISession:
             return None
 
     def finish_speaking(self):
-        """Mark TTS playback as complete and discard any echo audio captured."""
-        self.is_speaking = False
+        """Mark TTS playback as complete, discard echo, and start cooldown."""
         self.audio_buffer.clear()
         self.silence_frames = 0
+        # Brief cooldown: ignore audio for a bit to let residual echo die down.
+        # _cooldown_remaining counts bytes to skip before re-listening.
+        self._cooldown_remaining = 8000  # ~1 second at 8kHz
+        self.is_speaking = False
 
     async def get_greeting_audio(self) -> bytes | None:
         """Generate greeting TTS audio."""

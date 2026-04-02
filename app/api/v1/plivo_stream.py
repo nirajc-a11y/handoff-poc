@@ -111,7 +111,7 @@ async def plivo_audio_stream(
     conv_id: str = "",
     language: str = "en",
     speaker: str = "ritu",
-    skip_greeting: str = "",
+    skip_greeting: str = "",  # kept for backward compat, now ignored
 ):
     """Bidirectional audio stream from Plivo <Stream>."""
     await ws.accept()
@@ -187,12 +187,8 @@ async def plivo_audio_stream(
                     await _handle_stream_hangup(db, tenant_id, conv_id)
 
     try:
-        if skip_greeting.lower() in ("true", "1"):
-            greeting_audio = None
-            logger.info("Skipping Sarvam greeting — Plivo <Speak> already played")
-        else:
-            greeting_audio = await session.get_greeting_audio()
-            logger.info("Greeting audio: %s", f"{len(greeting_audio)} bytes" if greeting_audio else "NONE (TTS failed)")
+        greeting_audio = await session.get_greeting_audio()
+        logger.info("Greeting audio: %s", f"{len(greeting_audio)} bytes" if greeting_audio else "NONE (TTS failed)")
 
         while True:
             data = await ws.receive_text()

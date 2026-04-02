@@ -434,24 +434,14 @@ async def _handle_ai_handoff(
 
     if voice_mode == "livekit":
         # Mode B: Real-time AI via Plivo <Stream> + Sarvam
-        # Speak a greeting via Plivo native TTS first so the caller always hears something,
-        # even if Sarvam TTS is slow or misconfigured.
-        greeting_text = (
-            action.target_config.get("greeting", "")
-            if action.target_config
-            else ""
-        ) or "You are now connected to our AI assistant. How can I help you today?"
-        s_greet = _speak(greeting_text, language=lang)
-
+        # Sarvam generates the greeting via TTS over the WebSocket for consistent voice.
         stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
         stream_url = (
             f"{stream_ws_url}/api/v1/plivo/audio-stream"
             f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"
-            f"&skip_greeting=true"
         )
         escaped_url = _escape_xml(stream_url)
         xml = f"""<Response>
-    {s_greet}
     <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">{escaped_url}</Stream>
 </Response>"""
         return xml_response(xml)
@@ -1103,18 +1093,24 @@ async def plivo_recording_status(request: Request, db: AsyncSession = Depends(ge
     from app.db.models.message import Message
 
     form = await request.form()
-    form_dict = dict(form)
-    logger.info("Recording callback raw form: %s, query: %s", form_dict, dict(request.query_params))
-
-    # Plivo uses different field names depending on the recording method:
-    # calls.record() -> record_url, recording_id, recording_duration, call_uuid (snake_case)
-    # calls.create(record=True) -> RecordUrl, RecordingID, RecordingDuration, CallUUID (PascalCase)
-    record_url = str(form.get("record_url", "") or form.get("RecordUrl", "")).strip()
-    recording_id = str(form.get("recording_id", "") or form.get("RecordingID", ""))
-    record_duration = str(form.get("recording_duration", "0") or form.get("RecordingDuration", "0"))
-    call_uuid = str(form.get("call_uuid", "") or form.get("CallUUID", ""))
     tenant_id = request.query_params.get("tenant_id", "")
     conv_id = request.query_params.get("conv_id", "")
+
+    # Plivo calls.record() sends recording data as a JSON string in a `response` field
+    import json as _json
+    response_str = str(form.get("response", ""))
+    if response_str:
+        try:
+            data = _json.loads(response_str)
+        except (ValueError, TypeError):
+            data = {}
+    else:
+        data = dict(form)
+
+    record_url = str(data.get("record_url", "") or data.get("RecordUrl", "")).strip()
+    recording_id = str(data.get("recording_id", "") or data.get("RecordingID", ""))
+    record_duration = str(data.get("recording_duration", "0") or data.get("RecordingDuration", "0"))
+    call_uuid = str(data.get("call_uuid", "") or data.get("CallUUID", ""))
 
     logger.info(
         "Recording status: id=%s url=%s duration=%s call=%s conv=%s",
