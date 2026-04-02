@@ -10,6 +10,7 @@ import { Separator } from '@/components/ui/separator'
 import { MessageThread } from './message-thread'
 import { MessageInput } from './message-input'
 import { TranscriptPanel } from './transcript-panel'
+import { SupervisorPanel } from './supervisor-panel'
 import { ActionBar } from './action-bar'
 
 const FLOW_STEPS = [
@@ -92,7 +93,7 @@ export function ConversationDetail() {
   const setSelectedId = useSetAtom(selectedConvIdAtom)
   const { data: conversation, isLoading } = useConversation(selectedId)
   const { data: handoffs = [] } = useConversationHandoffs(selectedId)
-  const [tab, setTab] = useState<'messages' | 'transcript' | 'handoffs' | 'email-thread'>('messages')
+  const [tab, setTab] = useState<'messages' | 'transcript' | 'handoffs' | 'email-thread' | 'supervise'>('messages')
   const scrollRef = useRef<HTMLDivElement>(null)
 
   if (!selectedId) {
@@ -224,6 +225,7 @@ export function ConversationDetail() {
           { key: 'transcript', label: 'Transcript' },
           { key: 'handoffs', label: `Handoffs${handoffs.length > 0 ? ` (${handoffs.length})` : ''}` },
           ...(conversation.channel === 'email' ? [{ key: 'email-thread', label: 'Email Thread' }] : []),
+          ...(conversation.state === 'ai_handling' ? [{ key: 'supervise', label: 'Supervise' }] : []),
         ] as const).map((t) => (
           <button
             key={t.key}
@@ -251,6 +253,7 @@ export function ConversationDetail() {
         {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
         {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
         {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
+        {tab === 'supervise' && <SupervisorPanel conversationId={conversation.id} />}
       </div>
 
       {/* Message input (only on messages tab) */}

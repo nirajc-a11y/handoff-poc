@@ -26,6 +26,8 @@ from app.core.state_machine import Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
 from app.livekit.voice_agent import VoiceAISession
+from app.livekit import session_registry
+from app.livekit.session_registry import SessionHandle
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,11 @@ async def plivo_audio_stream(
         language=language, speaker=speaker,
     )
 
+    # Register session for supervisor listen/whisper/barge
+    _handle = SessionHandle(session=session, plivo_ws=ws)
+    if conv_id:
+        session_registry.register(conv_id, _handle)
+
     stream_started = False
     stream_sid = ""
     ws_open = True
@@ -224,6 +231,9 @@ async def plivo_audio_stream(
             if _stream_start_time == 0.0:
                 _stream_start_time = asyncio.get_event_loop().time()
             _stream_bytes_sent += len(mulaw_chunk)
+            # Forward AI audio to supervisor listeners
+            if _handle.listeners:
+                await _handle.forward_to_listeners(mulaw_chunk, "ai")
         except Exception:
             ws_open = False
 
@@ -322,6 +332,7 @@ async def plivo_audio_stream(
                 stream_started = True
                 start_data = msg.get("start", {})
                 stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
+                _handle.stream_sid = stream_sid
                 logger.info("Stream started: sid=%s", stream_sid)
 
                 # Stream greeting with low latency (~500ms to first audio)
@@ -341,6 +352,9 @@ async def plivo_audio_stream(
                 payload = msg.get("media", {}).get("payload", "")
                 if payload:
                     audio_bytes = base64.b64decode(payload)
+                    # Forward caller audio to supervisor listeners
+                    if _handle.listeners:
+                        await _handle.forward_to_listeners(audio_bytes, "caller")
                     speech_pause = session.add_audio(audio_bytes)
                     if speech_pause:
                         asyncio.create_task(process_and_respond())
@@ -355,4 +369,6 @@ async def plivo_audio_stream(
         logger.exception("Error in Plivo audio stream")
     finally:
         ws_open = False
+        if conv_id:
+            session_registry.unregister(conv_id)
         logger.info("Audio stream ended: conv=%s, turns=%d", conv_id, session.turn_count)

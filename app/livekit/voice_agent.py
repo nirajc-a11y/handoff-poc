@@ -126,6 +126,20 @@ class VoiceAISession:
         return self._barge_in_event.is_set()
 
     # ------------------------------------------------------------------
+    # Supervisor interaction
+    # ------------------------------------------------------------------
+
+    def inject_supervisor_hint(self, message: str):
+        """Inject supervisor guidance into conversation history.
+
+        The AI will see this as a system-level instruction and incorporate
+        it in the next response. The customer never hears this directly.
+        """
+        hint = {"role": "system", "content": f"[Supervisor guidance]: {message}"}
+        self.conversation_history.append(hint)
+        logger.info("Supervisor hint injected: '%s' (turn %d)", message[:80], self.turn_count)
+
+    # ------------------------------------------------------------------
     # State transitions
     # ------------------------------------------------------------------
 
