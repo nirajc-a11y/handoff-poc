@@ -12,6 +12,15 @@ Two independent sub-projects:
 
 ## Development Commands
 
+### Single Command (recommended)
+```bash
+bash scripts/dev.sh              # Start full stack: postgres + ngrok + backend + frontend
+bash scripts/dev.sh --seed       # Also seed the database (first run or reset)
+bash scripts/dev.sh --no-ngrok   # Skip ngrok (mock/local-only testing)
+```
+
+`dev.sh` orchestrates: Docker PostgreSQL -> ngrok (auto-detects static domain from `.env`) -> updates `BASE_WEBHOOK_URL` in `.env` -> updates Plivo app webhooks via API -> uvicorn `:8000` -> pnpm dev `:5173`. Ctrl+C stops all.
+
 ### Backend (project root)
 ```bash
 docker compose up -d postgres          # Start PostgreSQL
@@ -20,6 +29,7 @@ pip install -e ".[dev]"                 # Include dev deps (pytest, pytest-async
 python -m scripts.seed                  # Seed demo data (tenant, agents, IVR, campaign, leads)
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000  # Dev server
 python -m scripts.demo --tenant-id <ID> # Run all 6 handoff scenarios (mock, no provider needed)
+python -m scripts.update_webhooks      # Update Plivo app webhook URLs from BASE_WEBHOOK_URL
 ```
 
 ### Frontend (`frontend/`)

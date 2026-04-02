@@ -51,10 +51,40 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 
 ### Prerequisites
 - Python 3.11+
-- PostgreSQL (via Docker or local)
+- Docker (for PostgreSQL)
+- Node.js 18+ and pnpm (for frontend)
 - ngrok (for real phone calls)
 
-### Setup
+### Single Command Setup
+
+```bash
+# First time (installs deps, seeds DB, starts everything):
+pip install -e .
+cd frontend && pnpm install && cd ..
+bash scripts/dev.sh --seed
+
+# Subsequent runs (just start everything):
+bash scripts/dev.sh
+```
+
+This single command:
+1. Starts PostgreSQL via Docker Compose
+2. Starts ngrok (auto-detects static domain from `.env`)
+3. Updates `BASE_WEBHOOK_URL` in `.env` with the ngrok URL
+4. Updates Plivo application webhook URLs via API
+5. Starts the backend (uvicorn on `:8000` with hot-reload)
+6. Starts the frontend (Vite on `:5173` with proxy to backend)
+
+**Ctrl+C** stops all services cleanly. PostgreSQL container stays running.
+
+**Flags:**
+
+| Flag         | Description                                      |
+|--------------|--------------------------------------------------|
+| `--seed`     | Seed the database (first run, or to reset data)  |
+| `--no-ngrok` | Skip ngrok (for mock/local-only testing)         |
+
+### Manual Setup (step by step)
 
 ```bash
 # 1. Start PostgreSQL
@@ -73,8 +103,11 @@ python -m scripts.seed
 # 5. Start the server
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# 6. Open dashboard
-# http://localhost:8000/static/index.html?tenant_id=<TENANT_ID_FROM_SEED>
+# 6. Start frontend (separate terminal)
+cd frontend && pnpm dev
+
+# 7. Open dashboard
+# http://localhost:5173?tenant_id=<TENANT_ID_FROM_SEED>
 ```
 
 ### Mock Demo (no phone provider needed)
@@ -277,10 +310,12 @@ handoff-poc/
 │   ├── services/               #   Business logic layer (7 services)
 │   └── ws/                     #   WebSocket manager + event broadcaster
 ├── scripts/
+│   ├── dev.sh                  #   Single command: start full stack (pg + ngrok + backend + frontend)
 │   ├── seed.py                 #   Seed demo data (bilingual IVR, agents, leads)
 │   ├── demo.py                 #   Run all 6 handoff scenarios
 │   ├── setup_twilio.py         #   Configure Twilio webhooks + verify numbers
 │   ├── setup_plivo.py          #   Create Plivo app + endpoints
+│   ├── update_webhooks.py      #   Update Plivo app webhook URLs from BASE_WEBHOOK_URL
 │   └── verify_number.py        #   Verify caller IDs
 ├── static/
 │   └── index.html              #   Live operations dashboard + softphone
