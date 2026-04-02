@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Headphones, HeadphonesOff, MessageSquare, PhoneForwarded, Send, AlertTriangle } from 'lucide-react'
+import { Headphones, Square, MessageSquare, PhoneForwarded, Send, AlertTriangle } from 'lucide-react'
 import { useSupervisorListen, useSupervisorWhisper, useSupervisorBarge } from '@/hooks/use-supervisor'
 import { cn } from '@/lib/utils'
 
@@ -64,7 +64,7 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
         >
           {listen.isListening ? (
             <span className="flex items-center justify-center gap-2">
-              <HeadphonesOff className="size-4" /> Stop Listening
+              <Square className="size-4" /> Stop Listening
             </span>
           ) : (
             <span className="flex items-center justify-center gap-2">
