@@ -10,12 +10,32 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
-import { Bot } from 'lucide-react'
+import { Bot, Zap, Phone } from 'lucide-react'
 
 const SUPPORTED_LANGUAGES = [
   { code: 'en', label: 'English' },
   { code: 'mr', label: 'Marathi' },
 ]
+
+const VOICE_AI_MODES = [
+  {
+    value: 'plivo',
+    label: 'Standard (Plivo TTS)',
+    description: 'Record + transcribe + LLM + Plivo text-to-speech. ~5s response time.',
+    icon: Phone,
+  },
+  {
+    value: 'livekit',
+    label: 'Real-time (Sarvam AI)',
+    description: 'Live audio streaming with natural Indian voices. ~1-2s response time.',
+    icon: Zap,
+  },
+] as const
+
+const SARVAM_SPEAKERS = [
+  { value: 'meera', label: 'Meera (Female)' },
+  { value: 'arvind', label: 'Arvind (Male)' },
+] as const
 
 export function AIConfig() {
   const tenantId = useAtomValue(tenantIdAtom)
@@ -25,6 +45,8 @@ export function AIConfig() {
     enabled: !!tenantId,
   })
 
+  const [voiceAiMode, setVoiceAiMode] = useState<'plivo' | 'livekit'>('plivo')
+  const [sarvamSpeaker, setSarvamSpeaker] = useState<'meera' | 'arvind'>('meera')
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7)
   const [groqModel, setGroqModel] = useState('llama3-8b-8192')
   const [systemPrompt, setSystemPrompt] = useState('')
@@ -34,6 +56,12 @@ export function AIConfig() {
   useEffect(() => {
     if (tenant?.config) {
       const cfg = tenant.config
+      if (cfg.voice_ai_mode === 'plivo' || cfg.voice_ai_mode === 'livekit') {
+        setVoiceAiMode(cfg.voice_ai_mode)
+      }
+      if (cfg.sarvam_speaker === 'meera' || cfg.sarvam_speaker === 'arvind') {
+        setSarvamSpeaker(cfg.sarvam_speaker)
+      }
       if (typeof cfg.ai_confidence_threshold === 'number') {
         setConfidenceThreshold(cfg.ai_confidence_threshold as number)
       }
@@ -62,6 +90,8 @@ export function AIConfig() {
       await api.patch(`/tenants/${tenantId}`, {
         config: {
           ...tenant?.config,
+          voice_ai_mode: voiceAiMode,
+          sarvam_speaker: sarvamSpeaker,
           ai_confidence_threshold: confidenceThreshold,
           groq_model: groqModel,
           ai_system_prompt: systemPrompt,
@@ -97,6 +127,70 @@ export function AIConfig() {
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-5 max-w-lg">
+          {/* Voice AI Mode */}
+          <div className="flex flex-col gap-3">
+            <Label>Voice AI Mode</Label>
+            <div className="flex flex-col gap-2">
+              {VOICE_AI_MODES.map((mode) => {
+                const Icon = mode.icon
+                return (
+                  <label
+                    key={mode.value}
+                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      voiceAiMode === mode.value
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border hover:border-muted-foreground/30'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="voice_ai_mode"
+                      value={mode.value}
+                      checked={voiceAiMode === mode.value}
+                      onChange={(e) => setVoiceAiMode(e.target.value as 'plivo' | 'livekit')}
+                      className="mt-1 accent-primary"
+                    />
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm font-medium flex items-center gap-1.5">
+                        <Icon className="size-3.5" />
+                        {mode.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground">{mode.description}</span>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Sarvam Speaker (only when livekit mode) */}
+          {voiceAiMode === 'livekit' && (
+            <div className="flex flex-col gap-2">
+              <Label>Sarvam Voice</Label>
+              <div className="flex items-center gap-3">
+                {SARVAM_SPEAKERS.map((spk) => (
+                  <label
+                    key={spk.value}
+                    className="flex items-center gap-2 cursor-pointer select-none"
+                  >
+                    <input
+                      type="radio"
+                      name="sarvam_speaker"
+                      value={spk.value}
+                      checked={sarvamSpeaker === spk.value}
+                      onChange={(e) => setSarvamSpeaker(e.target.value as 'meera' | 'arvind')}
+                      className="accent-primary"
+                    />
+                    <span className="text-sm">{spk.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The Sarvam AI voice used for real-time text-to-speech.
+              </p>
+            </div>
+          )}
+
           {/* Confidence threshold */}
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">

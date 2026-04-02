@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_number: str = ""  # The Twilio phone number (e.g. "+14155551234")
 
+    # LiveKit (real-time audio streaming)
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
+    # Sarvam AI (Indian language STT/TTS)
+    sarvam_api_key: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

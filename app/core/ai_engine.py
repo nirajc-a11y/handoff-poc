@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -85,8 +84,6 @@ class AIEngine:
         "व्यवस्थापक",
     }
 
-    _CONFIDENCE_PATTERN = re.compile(r"CONFIDENCE:\s*([01](?:\.\d+)?)", re.IGNORECASE)
-
     def __init__(self) -> None:
         from app.config import settings
 
@@ -140,8 +137,8 @@ class AIEngine:
         customer_message: str,
         conversation_history: list[dict],  # [{"role": "user"/"assistant", "content": "..."}]
         system_prompt: str | None = None,
-        confidence_threshold: float = 0.7,
-        max_turns: int = 8,
+        confidence_threshold: float = 0.3,
+        max_turns: int = 10,
         language: str = "en",
     ) -> AIResponse:
         """Process a customer message and return an AI response.
@@ -220,16 +217,10 @@ class AIEngine:
         history: list[dict],
         message: str,
     ) -> tuple[str, float]:
-        """Call the Groq chat completion API and parse the confidence score."""
+        """Call the Groq chat completion API and return the response text."""
         client = AsyncGroq(api_key=self.groq_api_key)
 
-        augmented_system_prompt = (
-            f"{system_prompt}\n\n"
-            "IMPORTANT: After your response, on a new line write CONFIDENCE: X.X "
-            "where X.X is your confidence (0.0 to 1.0) that you fully resolved the customer's issue."
-        )
-
-        messages: list[dict] = [{"role": "system", "content": augmented_system_prompt}]
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": message})
 
@@ -237,20 +228,11 @@ class AIEngine:
             model=self.default_model,
             messages=messages,
             temperature=0.7,
-            max_tokens=512,
+            max_tokens=300,
         )
 
-        raw_text = completion.choices[0].message.content or ""
-
-        # Parse confidence from the response
-        confidence = 0.5  # default if parsing fails
-        match = self._CONFIDENCE_PATTERN.search(raw_text)
-        if match:
-            confidence = float(match.group(1))
-            # Strip the CONFIDENCE line from the user-visible text
-            raw_text = self._CONFIDENCE_PATTERN.sub("", raw_text).rstrip()
-
-        return raw_text, confidence
+        text = (completion.choices[0].message.content or "").strip()
+        return text, 0.85
 
     # ------------------------------------------------------------------
     # Mock fallback
@@ -258,7 +240,7 @@ class AIEngine:
 
     def _mock_response(self, message: str, turn_count: int, language: str = "en") -> AIResponse:
         """Template-based responses that gradually lose confidence as turns increase."""
-        if turn_count <= 1:
+        if turn_count <= 3:
             text = (
                 "संपर्क केल्याबद्दल धन्यवाद! मी तुम्हाला यासाठी मदत करण्यास आनंदित आहे. "
                 "कृपया मला अधिक तपशील द्या जेणेकरून मी तुम्हाला अधिक चांगल्या प्रकारे मदत करू शकेन."
@@ -273,7 +255,7 @@ class AIEngine:
                 should_escalate=False,
             )
 
-        if turn_count <= 3:
+        if turn_count <= 6:
             text = (
                 "अतिरिक्त माहितीबद्दल धन्यवाद. मी तुमच्यासाठी हे तपासतो. "
                 "तुम्ही शेअर केलेल्या माहितीच्या आधारे, मी हे सुचवू शकतो..."
@@ -284,11 +266,24 @@ class AIEngine:
             )
             return AIResponse(
                 text=text,
+                confidence=0.8,
+                should_escalate=False,
+            )
+
+        if turn_count <= 9:
+            text = (
+                "मी तुमच्या समस्येवर काम करत आहे. एक क्षण थांबा."
+                if language == "mr"
+                else
+                "I'm still working on your issue. Please bear with me for a moment."
+            )
+            return AIResponse(
+                text=text,
                 confidence=0.7,
                 should_escalate=False,
             )
 
-        # Turn 4+: low confidence, suggest human agent
+        # Turn 10+: turn limit reached, escalate
         text = (
             "तुम्हाला सर्वोत्तम मदत मिळावी अशी माझी इच्छा आहे. "
             "तुम्हाला एका तज्ञाशी जोडणे चांगले होईल जे तुम्हाला अधिक संपूर्ण मदत करू शकतील. "
@@ -301,9 +296,9 @@ class AIEngine:
         )
         return AIResponse(
             text=text,
-            confidence=0.4,
+            confidence=0.5,
             should_escalate=True,
-            escalation_reason="low_confidence_after_multiple_turns",
+            escalation_reason="turn_limit_reached",
         )
 
 

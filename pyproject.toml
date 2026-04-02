@@ -15,6 +15,7 @@ dependencies = [
     "plivo>=4.47.0",
     "twilio>=9.0.0",
     "python-multipart>=0.0.12",
+    "audioop-lts>=0.2.1; python_version>='3.13'",
 ]
 
 [project.optional-dependencies]

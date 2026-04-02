@@ -387,13 +387,37 @@ async def _handle_ai_handoff(
     except StateMachineError as exc:
         logger.warning("AI handoff state transition failed: %s", exc)
 
+    lang = (action.target_config or {}).get("language", "en")
+
+    # Check voice AI mode from tenant config
+    from app.db.models.tenant import Tenant
+    tenant_result = await db.execute(
+        select(Tenant.config).where(Tenant.id == uuid.UUID(tenant_id))
+    )
+    tenant_config = tenant_result.scalar_one_or_none() or {}
+    voice_mode = tenant_config.get("voice_ai_mode", "plivo")
+
+    if voice_mode == "livekit":
+        # Mode B: Real-time AI via Plivo <Stream> + Sarvam
+        stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
+        stream_url = (
+            f"{stream_ws_url}/api/v1/plivo/audio-stream"
+            f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}"
+        )
+        xml = f"""<Response>
+    <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">
+        {_escape_xml(stream_url)}
+    </Stream>
+</Response>"""
+        return xml_response(xml)
+
+    # Mode A (default): Record + transcribe + LLM + Plivo TTS
     greeting_text = (
         action.target_config.get("greeting", "")
         if action.target_config
         else ""
     ) or "You are now connected to our AI assistant. How can I help you today?"
 
-    lang = (action.target_config or {}).get("language", "en")
     s_greet = _speak(greeting_text, language=lang)
 
     # After greeting, record customer speech using Plivo <Record>
