@@ -153,16 +153,43 @@ async def plivo_audio_stream(
                 ws_open = False
                 break
 
+    async def send_chunk(mulaw_chunk: bytes):
+        """Send a single streaming TTS chunk to Plivo immediately."""
+        nonlocal ws_open
+        if not stream_started or not ws_open:
+            return
+        try:
+            await ws.send_json({
+                "event": "playAudio",
+                "streamId": stream_sid,
+                "media": {
+                    "contentType": "audio/x-mulaw",
+                    "sampleRate": 8000,
+                    "payload": base64.b64encode(mulaw_chunk).decode("ascii"),
+                },
+            })
+        except Exception:
+            ws_open = False
+
     async def process_and_respond():
         nonlocal ws_open
         async with processing_lock:
             async with async_session_factory() as db:
-                mulaw_response = await session.process_turn(db_session=db)
-                if mulaw_response and ws_open:
-                    # is_speaking is True during send_audio — blocks echo capture
+                # Pass send_chunk so TTS audio streams to caller as it generates
+                mulaw_response = await session.process_turn(db_session=db, on_audio=send_chunk)
+                if mulaw_response == b"":
+                    # Audio was streamed via on_audio callback — just finish speaking
+                    # No need to wait for playback since chunks were sent in real-time
+                    session.finish_speaking()
+                    if conv_id and tenant_id:
+                        await event_bus.publish(Event(
+                            topic="conversation.message_added",
+                            tenant_id=_uuid.UUID(tenant_id),
+                            payload={"conversation_id": conv_id},
+                        ))
+                elif mulaw_response and ws_open:
+                    # Fallback: full TTS response — send all at once
                     await send_audio(mulaw_response)
-                    # Wait for Plivo to finish PLAYING the audio before re-listening.
-                    # We sent chunks faster than real-time, so Plivo is still playing.
                     playback_secs = len(mulaw_response) / 8000
                     send_secs = (len(mulaw_response) // 320 + 1) * 0.018
                     remaining = playback_secs - send_secs
@@ -175,7 +202,7 @@ async def plivo_audio_stream(
                             tenant_id=_uuid.UUID(tenant_id),
                             payload={"conversation_id": conv_id},
                         ))
-                elif not mulaw_response:
+                else:
                     # STT returned empty — just reset
                     session.finish_speaking()
                 await db.commit()

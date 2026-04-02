@@ -90,3 +90,48 @@ async def synthesize(
         audio_data = base64.b64decode(audio_b64)
         logger.info("Sarvam TTS (%s, %s): %d bytes", lang_code, speaker, len(audio_data))
         return audio_data
+
+
+async def synthesize_stream(
+    text: str, language: str = "en", speaker: str = "ritu",
+    *, pace: float = 1.0,
+):
+    """Stream TTS audio as raw mulaw bytes via Sarvam HTTP streaming API.
+
+    Yields mulaw audio chunks as they arrive — first chunk in ~500ms
+    instead of waiting 5-9s for the full response. Output is raw 8kHz
+    mulaw ready for Plivo playback (no WAV conversion needed).
+    """
+    if not settings.sarvam_api_key:
+        raise ValueError("SARVAM_API_KEY is not configured. Cannot call Sarvam TTS.")
+
+    lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
+    speaker = V2_TO_V3_SPEAKER.get(speaker, speaker)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async with client.stream(
+            "POST",
+            f"{SARVAM_BASE}/text-to-speech/stream",
+            headers={
+                "api-subscription-key": settings.sarvam_api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "target_language_code": lang_code,
+                "speaker": speaker,
+                "model": "bulbul:v3",
+                "output_audio_codec": "mulaw",
+                "speech_sample_rate": 8000,
+                "pace": pace,
+            },
+        ) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                logger.error("Sarvam TTS stream error %d: %s", resp.status_code, body[:500])
+                resp.raise_for_status()
+            total = 0
+            async for chunk in resp.aiter_bytes(chunk_size=640):
+                total += len(chunk)
+                yield chunk
+            logger.info("Sarvam TTS stream (%s, %s): %d bytes total", lang_code, speaker, total)

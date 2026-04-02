@@ -25,9 +25,9 @@ const VOICE_AI_MODES = [
     icon: Phone,
   },
   {
-    value: 'livekit',
+    value: 'sarvam',
     label: 'Real-time (Sarvam AI)',
-    description: 'Live audio streaming with natural Indian voices. ~1-2s response time.',
+    description: 'Streaming audio with natural Indian voices via Sarvam STT + TTS.',
     icon: Zap,
   },
 ] as const
@@ -47,7 +47,7 @@ export function AIConfig() {
     enabled: !!tenantId,
   })
 
-  const [voiceAiMode, setVoiceAiMode] = useState<'plivo' | 'livekit'>('plivo')
+  const [voiceAiMode, setVoiceAiMode] = useState<'plivo' | 'sarvam'>('plivo')
   const [sarvamSpeaker, setSarvamSpeaker] = useState<string>('ritu')
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7)
   const [groqModel, setGroqModel] = useState('llama3-8b-8192')
@@ -58,7 +58,7 @@ export function AIConfig() {
   useEffect(() => {
     if (tenant?.config) {
       const cfg = tenant.config
-      if (cfg.voice_ai_mode === 'plivo' || cfg.voice_ai_mode === 'livekit') {
+      if (cfg.voice_ai_mode === 'plivo' || cfg.voice_ai_mode === 'sarvam') {
         setVoiceAiMode(cfg.voice_ai_mode)
       }
       const validSpeakers = SARVAM_SPEAKERS.map(s => s.value) as readonly string[]
@@ -150,7 +150,7 @@ export function AIConfig() {
                       name="voice_ai_mode"
                       value={mode.value}
                       checked={voiceAiMode === mode.value}
-                      onChange={(e) => setVoiceAiMode(e.target.value as 'plivo' | 'livekit')}
+                      onChange={(e) => setVoiceAiMode(e.target.value as 'plivo' | 'sarvam')}
                       className="mt-1 accent-primary"
                     />
                     <div className="flex flex-col gap-0.5">
@@ -166,8 +166,8 @@ export function AIConfig() {
             </div>
           </div>
 
-          {/* Sarvam Speaker (only when livekit mode) */}
-          {voiceAiMode === 'livekit' && (
+          {/* Sarvam Speaker (only when sarvam mode) */}
+          {voiceAiMode === 'sarvam' && (
             <div className="flex flex-col gap-2">
               <Label>Sarvam Voice</Label>
               <div className="flex items-center gap-3">

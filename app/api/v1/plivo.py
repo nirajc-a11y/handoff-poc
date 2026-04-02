@@ -423,17 +423,20 @@ async def _handle_ai_handoff(
     )
     tenant_config = tenant_result.scalar_one_or_none() or {}
     voice_mode = tenant_config.get("voice_ai_mode", "plivo")
+    # Accept both "livekit" (legacy) and "sarvam" (current) as the real-time mode
+    if voice_mode == "sarvam":
+        voice_mode = "sarvam"
     sarvam_speaker = tenant_config.get("sarvam_speaker", "ritu")
     logger.info("AI handoff: voice_mode=%s, lang=%s, speaker=%s", voice_mode, lang, sarvam_speaker)
 
-    if voice_mode == "livekit" and not settings.sarvam_api_key:
+    if voice_mode == "sarvam" and not settings.sarvam_api_key:
         logger.error(
             "LiveKit/Sarvam mode selected for tenant %s but SARVAM_API_KEY is empty — falling back to Plivo mode",
             tenant_id,
         )
         voice_mode = "plivo"
 
-    if voice_mode == "livekit":
+    if voice_mode == "sarvam":
         # Mode B: Real-time AI via Plivo <Stream> + Sarvam
         # Sarvam generates the greeting via TTS over the WebSocket for consistent voice.
         stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")

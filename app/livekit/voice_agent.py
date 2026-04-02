@@ -71,7 +71,7 @@ class VoiceAISession:
 
         # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
         self.silence_threshold = 200  # RMS below this = silence (16-bit PCM scale)
-        self.silence_duration_frames = 12000  # ~1.5 seconds
+        self.silence_duration_frames = 8000  # ~1.0 seconds
         self.min_speech_frames = 3200  # ~0.4 seconds
 
     def add_audio(self, mulaw_chunk: bytes) -> bool:
@@ -99,12 +99,18 @@ class VoiceAISession:
         self.audio_buffer.clear()
         self.silence_frames = 0
 
-    async def process_turn(self, db_session=None) -> bytes | None:
-        """Process buffered audio: STT -> LLM -> TTS. Returns mulaw audio.
+    async def process_turn(self, db_session=None, on_audio=None) -> bytes | None:
+        """Process buffered audio: STT -> LLM -> TTS.
+
+        Args:
+            db_session: Async SQLAlchemy session for saving messages.
+            on_audio: Optional async callback for streaming TTS. When provided,
+                mulaw chunks are sent via on_audio(chunk) as they arrive from
+                Sarvam streaming API. Returns b"" to signal audio was streamed.
+                When None, returns full mulaw audio (legacy path).
 
         IMPORTANT: is_speaking remains True after return — the caller must
-        call finish_speaking() after send_audio() completes to prevent
-        echo from being captured during TTS playback.
+        call finish_speaking() after audio playback completes.
         """
         if len(self.audio_buffer) < self.min_speech_frames:
             self.audio_buffer.clear()
@@ -154,15 +160,23 @@ class VoiceAISession:
             self.should_end_call = ai_response.should_end_call
 
             # TTS — truncate long responses to keep latency low
-            # Sarvam TTS latency scales with text length (~1s per 50 words)
             tts_text = ai_response.text
             if len(tts_text) > 300:
-                # Cut at last sentence boundary within limit
                 cut = tts_text[:300].rfind(".")
-                if cut > 100:
-                    tts_text = tts_text[:cut + 1]
-                else:
-                    tts_text = tts_text[:300]
+                tts_text = tts_text[:cut + 1] if cut > 100 else tts_text[:300]
+
+            if on_audio:
+                # Streaming TTS: send mulaw chunks to caller as they arrive
+                # First chunk arrives in ~500ms vs 5-9s for full response
+                try:
+                    async for chunk in sarvam.synthesize_stream(tts_text, self.language, self.speaker):
+                        await on_audio(chunk)
+                    return b""  # signal: audio already sent via callback
+                except Exception:
+                    logger.warning("Streaming TTS failed, falling back to full TTS")
+                    # Fall through to non-streaming path
+
+            # Full TTS fallback (non-streaming or streaming failure)
             tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker)
             mulaw_audio = _wav_to_mulaw(tts_audio)
             # NOTE: is_speaking stays True — caller must call finish_speaking()
