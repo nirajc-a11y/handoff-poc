@@ -5,6 +5,7 @@ import { OutboundDialer } from './outbound-dialer'
 import { CampaignWidget } from './campaign-widget'
 import { QueueList } from './queue-list'
 import { EventFeed } from './event-feed'
+import { SoftphonePanel } from '@/components/softphone/softphone-panel'
 
 export function RightPanel() {
   return (
@@ -25,6 +26,15 @@ export function RightPanel() {
           </CardHeader>
           <CardContent>
             <QueueList />
+          </CardContent>
+        </Card>
+
+        <Card size="sm">
+          <CardHeader className="pb-0">
+            <CardTitle className="text-xs font-semibold text-gray-600">Softphone</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <SoftphonePanel />
           </CardContent>
         </Card>
 

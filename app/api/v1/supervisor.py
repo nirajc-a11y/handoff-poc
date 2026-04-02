@@ -179,6 +179,7 @@ async def supervisor_barge(conv_id: str):
                 await asyncio.to_thread(
                     lambda: plivo_client.calls.update(
                         call_uuid,
+                        legs="aleg",
                         aleg_url=escalate_url,
                         aleg_method="POST",
                     )

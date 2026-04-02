@@ -225,7 +225,7 @@ export function ConversationDetail() {
           { key: 'transcript', label: 'Transcript' },
           { key: 'handoffs', label: `Handoffs${handoffs.length > 0 ? ` (${handoffs.length})` : ''}` },
           ...(conversation.channel === 'email' ? [{ key: 'email-thread', label: 'Email Thread' }] : []),
-          ...(conversation.state === 'ai_handling' ? [{ key: 'supervise', label: 'Supervise' }] : []),
+          ...(conversation.channel === 'voice' ? [{ key: 'supervise', label: 'Supervise' }] : []),
         ] as const).map((t) => (
           <button
             key={t.key}
@@ -253,7 +253,7 @@ export function ConversationDetail() {
         {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
         {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
         {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
-        {tab === 'supervise' && <SupervisorPanel conversationId={conversation.id} />}
+        {tab === 'supervise' && <SupervisorPanel conversationId={conversation.id} isActive={conversation.state !== 'ended' && conversation.state !== 'failed'} />}
       </div>
 
       {/* Message input (only on messages tab) */}

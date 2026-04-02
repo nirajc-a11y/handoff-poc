@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { useAtomValue } from 'jotai'
-import { tenantIdAtom } from '@/stores/auth'
 
 // ---------------------------------------------------------------------------
 // Listen — stream live audio from an active call
@@ -17,20 +15,20 @@ export function useSupervisorListen(convId: string | null) {
   const [state, setState] = useState<ListenState>({ isListening: false, error: null })
   const wsRef = useRef<WebSocket | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
-  const tenantId = useAtomValue(tenantIdAtom)
+  const nextPlayTimeRef = useRef(0)
 
   const startListening = useCallback(() => {
     if (!convId || wsRef.current) return
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const url = `${proto}://${window.location.host}/api/v1/supervisor/listen/${convId}`
-
     const ws = new WebSocket(url)
     wsRef.current = ws
 
-    // Set up Web Audio API for mulaw playback
+    // Web Audio API — schedule buffers sequentially to avoid overlaps/gaps
     const audioCtx = new AudioContext({ sampleRate: 8000 })
     audioCtxRef.current = audioCtx
+    nextPlayTimeRef.current = 0
 
     ws.onopen = () => {
       setState({ isListening: true, error: null })
@@ -39,27 +37,39 @@ export function useSupervisorListen(convId: string | null) {
     ws.onmessage = (evt) => {
       try {
         const data = JSON.parse(evt.data)
-        if (data.keepalive) return
+        if (data.keepalive || !data.audio) return
         if (data.error) {
           setState({ isListening: false, error: data.error })
           ws.close()
           return
         }
-        if (data.audio) {
-          // Decode base64 mulaw and play via Web Audio API
-          const raw = atob(data.audio)
-          const mulaw = new Uint8Array(raw.length)
-          for (let i = 0; i < raw.length; i++) mulaw[i] = raw.charCodeAt(i)
-          const pcm = decodeMulaw(mulaw)
-          playPcm(audioCtx, pcm)
-        }
+
+        // Decode base64 mulaw
+        const raw = atob(data.audio)
+        const mulaw = new Uint8Array(raw.length)
+        for (let i = 0; i < raw.length; i++) mulaw[i] = raw.charCodeAt(i)
+
+        // Convert mulaw -> PCM float32
+        const pcm = decodeMulaw(mulaw)
+
+        // Create audio buffer and schedule it after the previous one
+        const buffer = audioCtx.createBuffer(1, pcm.length, 8000)
+        buffer.getChannelData(0).set(pcm)
+        const source = audioCtx.createBufferSource()
+        source.buffer = buffer
+        source.connect(audioCtx.destination)
+
+        const now = audioCtx.currentTime
+        const startAt = Math.max(now, nextPlayTimeRef.current)
+        source.start(startAt)
+        nextPlayTimeRef.current = startAt + buffer.duration
       } catch {
-        // ignore parse errors
+        // ignore decode errors
       }
     }
 
     ws.onerror = () => {
-      setState({ isListening: false, error: 'Connection error' })
+      setState({ isListening: false, error: 'WebSocket connection failed' })
     }
 
     ws.onclose = () => {
@@ -73,6 +83,7 @@ export function useSupervisorListen(convId: string | null) {
     wsRef.current = null
     audioCtxRef.current?.close()
     audioCtxRef.current = null
+    nextPlayTimeRef.current = 0
     setState({ isListening: false, error: null })
   }, [])
 
@@ -80,7 +91,9 @@ export function useSupervisorListen(convId: string | null) {
   useEffect(() => {
     return () => {
       wsRef.current?.close()
+      wsRef.current = null
       audioCtxRef.current?.close()
+      audioCtxRef.current = null
     }
   }, [convId])
 
@@ -120,22 +133,10 @@ export function useSupervisorBarge(convId: string | null) {
 }
 
 // ---------------------------------------------------------------------------
-// Active sessions list
-// ---------------------------------------------------------------------------
-
-export function useActiveSessions() {
-  // Simple fetch, no polling needed — supervisor checks manually
-  return useMutation({
-    mutationFn: async () => api.get('/supervisor/active-sessions'),
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Mulaw decoder (ITU G.711 mu-law)
+// Mulaw decoder (ITU G.711 mu-law -> Float32 PCM)
 // ---------------------------------------------------------------------------
 
 const MULAW_BIAS = 33
-const MULAW_CLIP = 8159
 
 function decodeMulaw(mulaw: Uint8Array): Float32Array {
   const pcm = new Float32Array(mulaw.length)
@@ -146,16 +147,7 @@ function decodeMulaw(mulaw: Uint8Array): Float32Array {
     const mantissa = mu & 0x0f
     let sample = ((mantissa << 1) + MULAW_BIAS) << exponent
     sample = sign * (sample - MULAW_BIAS)
-    pcm[i] = sample / 32768.0 // normalize to [-1, 1]
+    pcm[i] = sample / 32768.0
   }
   return pcm
-}
-
-function playPcm(ctx: AudioContext, pcm: Float32Array) {
-  const buffer = ctx.createBuffer(1, pcm.length, 8000)
-  buffer.getChannelData(0).set(pcm)
-  const source = ctx.createBufferSource()
-  source.buffer = buffer
-  source.connect(ctx.destination)
-  source.start()
 }

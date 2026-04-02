@@ -1,27 +1,39 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Headphones, Square, MessageSquare, PhoneForwarded, Send, AlertTriangle } from 'lucide-react'
 import { useSupervisorListen, useSupervisorWhisper, useSupervisorBarge } from '@/hooks/use-supervisor'
 import { cn } from '@/lib/utils'
 
 interface SupervisorPanelProps {
   conversationId: string
+  /** False when the call has ended — disables all controls */
+  isActive: boolean
 }
 
-export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
+export function SupervisorPanel({ conversationId, isActive }: SupervisorPanelProps) {
   const listen = useSupervisorListen(conversationId)
   const whisper = useSupervisorWhisper(conversationId)
   const barge = useSupervisorBarge(conversationId)
   const [whisperText, setWhisperText] = useState('')
   const [bargeConfirm, setBargeConfirm] = useState(false)
 
+  // Auto-stop listening when call ends
+  useEffect(() => {
+    if (!isActive && listen.isListening) {
+      listen.stopListening()
+    }
+  }, [isActive])
+
+  const disabled = !isActive
+
   const handleWhisper = () => {
-    if (!whisperText.trim()) return
+    if (!whisperText.trim() || disabled) return
     whisper.mutate(whisperText.trim(), {
       onSuccess: () => setWhisperText(''),
     })
   }
 
   const handleBarge = () => {
+    if (disabled) return
     if (!bargeConfirm) {
       setBargeConfirm(true)
       return
@@ -33,8 +45,14 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
 
   return (
     <div className="flex flex-col gap-4 p-4">
+      {!isActive && (
+        <div className="rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-center">
+          <p className="text-xs text-gray-500">Call has ended. Supervision controls are disabled.</p>
+        </div>
+      )}
+
       {/* Listen Section */}
-      <div className="rounded-lg border bg-card p-3">
+      <div className={cn('rounded-lg border bg-card p-3', disabled && 'opacity-50')}>
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <Headphones className="size-4 text-gray-500" />
@@ -55,11 +73,13 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
         )}
         <button
           onClick={listen.isListening ? listen.stopListening : listen.startListening}
+          disabled={disabled && !listen.isListening}
           className={cn(
             'w-full rounded-md px-3 py-2 text-sm font-medium transition-colors',
             listen.isListening
               ? 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
-              : 'bg-green-50 text-green-700 hover:bg-green-100 border border-green-200'
+              : 'bg-green-50 text-green-700 hover:bg-green-100 border border-green-200',
+            disabled && !listen.isListening && 'cursor-not-allowed'
           )}
         >
           {listen.isListening ? (
@@ -75,7 +95,7 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
       </div>
 
       {/* Whisper Section */}
-      <div className="rounded-lg border bg-card p-3">
+      <div className={cn('rounded-lg border bg-card p-3', disabled && 'opacity-50')}>
         <div className="flex items-center gap-2 mb-2">
           <MessageSquare className="size-4 text-gray-500" />
           <span className="text-sm font-medium">Whisper to AI</span>
@@ -90,11 +110,12 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
             onChange={(e) => setWhisperText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleWhisper()}
             placeholder="e.g. Mention the Pro plan discount..."
-            className="flex-1 rounded-md border px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-blue-400"
+            disabled={disabled}
+            className="flex-1 rounded-md border px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:cursor-not-allowed"
           />
           <button
             onClick={handleWhisper}
-            disabled={!whisperText.trim() || whisper.isPending}
+            disabled={!whisperText.trim() || whisper.isPending || disabled}
             className="rounded-md bg-blue-600 px-3 py-1.5 text-white text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             <Send className="size-4" />
@@ -109,7 +130,7 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
       </div>
 
       {/* Barge Section */}
-      <div className="rounded-lg border bg-card p-3">
+      <div className={cn('rounded-lg border bg-card p-3', disabled && 'opacity-50')}>
         <div className="flex items-center gap-2 mb-2">
           <PhoneForwarded className="size-4 text-gray-500" />
           <span className="text-sm font-medium">Take Over Call</span>
@@ -131,13 +152,13 @@ export function SupervisorPanel({ conversationId }: SupervisorPanelProps) {
         )}
         <button
           onClick={handleBarge}
-          disabled={barge.isPending || barge.isSuccess}
+          disabled={barge.isPending || barge.isSuccess || disabled}
           className={cn(
             'w-full rounded-md px-3 py-2 text-sm font-medium transition-colors',
             bargeConfirm
               ? 'bg-red-600 text-white hover:bg-red-700'
               : 'bg-orange-50 text-orange-700 hover:bg-orange-100 border border-orange-200',
-            (barge.isPending || barge.isSuccess) && 'opacity-50 cursor-not-allowed'
+            (barge.isPending || barge.isSuccess || disabled) && 'opacity-50 cursor-not-allowed'
           )}
         >
           {barge.isPending ? (

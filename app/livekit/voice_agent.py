@@ -240,6 +240,15 @@ class VoiceAISession:
             self.silence_frames = 0
             return None
 
+        # Check average energy — skip STT if buffer is mostly silence/noise
+        pcm_all = audioop.ulaw2lin(bytes(self.audio_buffer), 2)
+        avg_rms = audioop.rms(pcm_all, 2)
+        if avg_rms < self.silence_threshold:
+            logger.debug("Skipping STT: avg RMS %d below threshold %d", avg_rms, self.silence_threshold)
+            self.audio_buffer.clear()
+            self.silence_frames = 0
+            return None
+
         self.start_speaking()
         audio_data = bytes(self.audio_buffer)
         self.audio_buffer.clear()
