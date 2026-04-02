@@ -76,6 +76,7 @@ def _conversation_to_dict(conv) -> dict:
         "ended_at": conv.ended_at.isoformat() if conv.ended_at else None,
         "duration_seconds": conv.duration_seconds,
         "disposition": conv.disposition,
+        "recording_url": conv.recording_url,
     }
 
 

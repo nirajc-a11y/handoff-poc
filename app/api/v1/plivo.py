@@ -72,6 +72,28 @@ def _escape_xml(text: str) -> str:
     )
 
 
+async def _start_call_recording(tenant_id: str, call_uuid: str, conv_id: str):
+    """Start full-call recording via Plivo REST API (fire-and-forget)."""
+    import asyncio
+    try:
+        import plivo as _plivo
+        client = _plivo.RestClient(settings.plivo_auth_id, settings.plivo_auth_token)
+        recording_cb = _abs(
+            f"/api/v1/plivo/recording-status?tenant_id={tenant_id}&conv_id={conv_id}"
+        )
+        await asyncio.to_thread(
+            lambda: client.calls.record(
+                call_uuid,
+                file_format="mp3",
+                callback_url=recording_cb,
+                callback_method="POST",
+            )
+        )
+        logger.info("Started call recording for %s (conv=%s)", call_uuid, conv_id)
+    except Exception:
+        logger.exception("Failed to start recording for call %s", call_uuid)
+
+
 async def _find_or_create_conversation(
     db: AsyncSession,
     tenant_id: str,
@@ -262,6 +284,12 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
 </Response>"""
 
         await db.commit()
+
+        # Start call-level recording for inbound calls
+        if call_uuid and settings.plivo_auth_id:
+            import asyncio as _aio
+            _aio.create_task(_start_call_recording(tenant_id, str(call_uuid), conv_id))
+
         return xml_response(xml)
 
     except Exception:
@@ -1059,6 +1087,116 @@ async def plivo_call_status(
         )
         await db.commit()
         return {"status": "ignored", "reason": str(exc)}
+
+
+@router.post("/recording-status")
+async def plivo_recording_status(request: Request, db: AsyncSession = Depends(get_db)):
+    """Handle Plivo recording callback — download and store full-call recording.
+
+    Plivo POSTs here when a call-level recording is ready.  We download the
+    MP3, save it locally, store the path on the conversation, and publish a
+    WebSocket event so the frontend can show the player.
+    """
+    import os
+    import httpx as httpx_client
+    from app.core.events import Event, event_bus
+    from app.db.models.message import Message
+
+    form = await request.form()
+    record_url = str(form.get("RecordUrl", "")).strip()
+    recording_id = str(form.get("RecordingID", ""))
+    record_duration = str(form.get("RecordingDuration", "0"))
+    call_uuid = str(form.get("CallUUID", ""))
+    tenant_id = request.query_params.get("tenant_id", "")
+    conv_id = request.query_params.get("conv_id", "")
+
+    logger.info(
+        "Recording status: id=%s url=%s duration=%s call=%s conv=%s",
+        recording_id, record_url, record_duration, call_uuid, conv_id,
+    )
+
+    if not record_url:
+        return {"status": "ignored", "reason": "no_record_url"}
+
+    # Resolve conversation
+    conversation_id = None
+    tenant_uuid = None
+
+    if conv_id and tenant_id:
+        try:
+            conversation_id = uuid.UUID(conv_id)
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError:
+            pass
+
+    if conversation_id is None and call_uuid:
+        stmt = (
+            select(ChannelSession)
+            .where(ChannelSession.provider == "plivo", ChannelSession.provider_session_id == call_uuid)
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        session = result.scalar_one_or_none()
+        if session:
+            conversation_id = session.conversation_id
+            tenant_uuid = session.tenant_id
+
+    if conversation_id is None or tenant_uuid is None:
+        logger.warning("Could not resolve conversation for recording %s (call %s)", recording_id, call_uuid)
+        return {"status": "ignored", "reason": "conversation_not_found"}
+
+    # Download the recording MP3 from Plivo
+    recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    filename = f"{conversation_id}_full_{timestamp}.mp3"
+    filepath = os.path.join(recordings_dir, filename)
+
+    try:
+        async with httpx_client.AsyncClient(timeout=60.0) as http:
+            resp = await http.get(record_url, follow_redirects=True)
+            resp.raise_for_status()
+            with open(filepath, "wb") as f:
+                f.write(resp.content)
+        logger.info("Saved full-call recording: %s (%d bytes)", filename, len(resp.content))
+    except Exception:
+        logger.exception("Failed to download recording %s", recording_id)
+        return {"status": "error", "reason": "download_failed"}
+
+    # Update conversation with recording URL
+    recording_path = f"/recordings/{filename}"
+    conv_stmt = select(Conversation).where(Conversation.id == conversation_id)
+    conv_result = await db.execute(conv_stmt)
+    conv = conv_result.scalar_one_or_none()
+    if conv:
+        conv.recording_url = recording_path
+
+    # Create a Message record
+    message = Message(
+        tenant_id=tenant_uuid,
+        conversation_id=conversation_id,
+        sender_type="system",
+        content_type="audio",
+        content=recording_path,
+        metadata_={
+            "type": "full_call_recording",
+            "recording_id": recording_id,
+            "recording_duration": record_duration,
+            "recording_url": record_url,
+            "call_uuid": call_uuid,
+        },
+    )
+    db.add(message)
+    await db.commit()
+
+    # Publish WebSocket event
+    await event_bus.publish(Event(
+        topic="conversation.recording_ready",
+        tenant_id=tenant_uuid,
+        payload={"conversation_id": str(conversation_id), "recording_url": recording_path},
+    ))
+
+    return {"status": "ok", "conversation_id": str(conversation_id), "recording_url": recording_path}
 
 
 @router.post("/fallback")

@@ -56,6 +56,7 @@ def _conversation_to_dict(conv) -> dict:
         "queue_priority": conv.queue_priority,
         "queue_entered_at": conv.queue_entered_at.isoformat() if conv.queue_entered_at else None,
         "ai_escalation_reason": conv.ai_escalation_reason,
+        "recording_url": conv.recording_url,
         "started_at": conv.started_at.isoformat() if conv.started_at else None,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     }

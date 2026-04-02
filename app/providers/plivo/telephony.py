@@ -83,6 +83,10 @@ class PlivoTelephonyProvider(TelephonyProvider):
         )
 
         try:
+            recording_callback = self._webhook_url(
+                "/api/v1/plivo/recording-status",
+                tenant_id=tenant_id,
+            )
             response = await asyncio.to_thread(
                 lambda: self.client.calls.create(
                     from_=request.from_number,
@@ -91,6 +95,10 @@ class PlivoTelephonyProvider(TelephonyProvider):
                     answer_method="POST",
                     hangup_url=status_callback,
                     hangup_method="POST",
+                    record=True,
+                    record_file_format="mp3",
+                    recording_callback_url=recording_callback,
+                    recording_callback_method="POST",
                 )
             )
 

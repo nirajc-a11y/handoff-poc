@@ -61,6 +61,7 @@ def _conversation_to_dict(conv) -> dict:
         "disposition_notes": conv.disposition_notes,
         "ai_confidence_score": conv.ai_confidence_score,
         "ai_escalation_reason": conv.ai_escalation_reason,
+        "recording_url": conv.recording_url,
         "context": conv.context,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     }

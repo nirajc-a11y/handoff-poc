@@ -54,6 +54,9 @@ class Conversation(Base, PrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     ai_confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     ai_escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Recording
+    recording_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Context accumulator
     context: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
 

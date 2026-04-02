@@ -19,6 +19,7 @@ export interface Conversation {
   duration_seconds: number | null
   disposition: string | null; disposition_notes: string | null
   ai_confidence_score: number | null; ai_escalation_reason: string | null
+  recording_url: string | null
   context: Record<string, unknown>
   created_at: string; updated_at: string
 }

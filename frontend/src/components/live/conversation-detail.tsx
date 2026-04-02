@@ -205,6 +205,14 @@ export function ConversationDetail() {
             </>
           )}
         </div>
+
+        {/* Full call recording player */}
+        {conversation.recording_url && (
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-[10px] font-medium text-gray-500 shrink-0">Recording</span>
+            <audio controls src={conversation.recording_url} className="h-7 w-full" controlsList="nodownload" preload="none" />
+          </div>
+        )}
       </div>
 
       {/* Tab bar */}
