@@ -174,6 +174,7 @@ class AIEngine:
         confidence_threshold: float = 0.3,
         max_turns: int = 10,
         language: str = "en",
+        company_name: str = "Demo Corp",
     ) -> AIResponse:
         """Process a customer message and return an AI response.
 
@@ -213,9 +214,9 @@ class AIEngine:
         for keyword in hangup_kw:
             if keyword in message_lower:
                 farewell_text = (
-                    "Demo Corp शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
+                    f"{company_name} शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
                     if language == "mr"
-                    else "Thank you for calling Demo Corp. Have a great day! Goodbye."
+                    else f"Thank you for calling {company_name}. Have a great day! Goodbye."
                 )
                 return AIResponse(
                     text=farewell_text,
@@ -341,6 +342,8 @@ class AIEngine:
         customer_message: str,
         conversation_history: list[dict],
         language: str = "en",
+        system_prompt: str | None = None,
+        company_name: str = "Demo Corp",
     ):
         """Like process_message but yields (sentence, metadata) tuples.
 
@@ -372,9 +375,9 @@ class AIEngine:
         for keyword in hangup_kw:
             if keyword in message_lower:
                 farewell_text = (
-                    "Demo Corp शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
+                    f"{company_name} शी संपर्क केल्याबद्दल धन्यवाद. तुमचा दिवस चांगला जावो!"
                     if language == "mr"
-                    else "Thank you for calling Demo Corp. Have a great day! Goodbye."
+                    else f"Thank you for calling {company_name}. Have a great day! Goodbye."
                 )
                 yield farewell_text, AIResponse(
                     text=farewell_text, confidence=1.0,
@@ -382,8 +385,9 @@ class AIEngine:
                 )
                 return
 
-        # Stream from Groq
-        system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
+        # Stream from Groq — use tenant prompt if provided, else language default
+        if system_prompt is None:
+            system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
         if self.groq_api_key and _GROQ_AVAILABLE:
             try:
                 async for sentence in self._call_groq_stream(

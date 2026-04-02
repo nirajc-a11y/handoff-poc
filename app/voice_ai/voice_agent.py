@@ -70,11 +70,14 @@ class SpeakingState:
 class VoiceAISession:
     """One AI conversation session for a phone call."""
 
-    def __init__(self, tenant_id: str, conv_id: str, language: str = "en", speaker: str = "ritu"):
+    def __init__(self, tenant_id: str, conv_id: str, language: str = "en", speaker: str = "ritu",
+                 tenant_name: str = "Demo Corp", system_prompt: str | None = None):
         self.tenant_id = tenant_id
         self.conv_id = conv_id
         self.language = language
         self.speaker = speaker
+        self.tenant_name = tenant_name
+        self.system_prompt = system_prompt
         self.conversation_history: list[dict] = []
         self.turn_count = 0
         self.audio_buffer = bytearray()
@@ -417,6 +420,8 @@ class VoiceAISession:
                         customer_message=transcript,
                         conversation_history=self.conversation_history,
                         language=self.language,
+                        system_prompt=self.system_prompt,
+                        company_name=self.tenant_name,
                     ):
                         if self._barge_in_event.is_set():
                             logger.info("Barge-in: stopping LLM+TTS pipeline")
@@ -479,6 +484,8 @@ class VoiceAISession:
                 customer_message=transcript,
                 conversation_history=self.conversation_history,
                 language=self.language,
+                system_prompt=self.system_prompt,
+                company_name=self.tenant_name,
             )
             logger.info("Turn %d - AI: %s (escalate=%s)", self.turn_count, ai_response.text[:80], ai_response.should_escalate)
 
@@ -534,9 +541,9 @@ class VoiceAISession:
         self.start_speaking()
 
         greeting = (
-            "Demo Corp विक्री विभागात आपले स्वागत आहे. मी तुमचा AI सहाय्यक आहे. मी तुम्हाला कशी मदत करू शकतो?"
+            f"{self.tenant_name} विक्री विभागात आपले स्वागत आहे. मी तुमचा AI सहाय्यक आहे. मी तुम्हाला कशी मदत करू शकतो?"
             if self.language == "mr" else
-            "Welcome to Demo Corp. I'm your AI assistant. How can I help you today?"
+            f"Welcome to {self.tenant_name}. I'm your AI assistant. How can I help you today?"
         )
         try:
             total = 0
@@ -563,9 +570,9 @@ class VoiceAISession:
             return None
         self._greeting_sent = True
         greeting = (
-            "Demo Corp विक्री विभागात आपले स्वागत आहे. मी तुमचा AI सहाय्यक आहे. मी तुम्हाला कशी मदत करू शकतो?"
+            f"{self.tenant_name} विक्री विभागात आपले स्वागत आहे. मी तुमचा AI सहाय्यक आहे. मी तुम्हाला कशी मदत करू शकतो?"
             if self.language == "mr" else
-            "Welcome to Demo Corp. I'm your AI assistant. How can I help you today?"
+            f"Welcome to {self.tenant_name}. I'm your AI assistant. How can I help you today?"
         )
         try:
             tts_audio = await sarvam.synthesize(greeting, self.language, self.speaker)

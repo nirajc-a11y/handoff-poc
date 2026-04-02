@@ -25,6 +25,7 @@ from app.core.handoff_engine import handoff_engine
 from app.core.state_machine import Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
+from app.db.models.tenant import Tenant
 from app.voice_ai.voice_agent import VoiceAISession
 from app.voice_ai import session_registry
 from app.voice_ai.session_registry import SessionHandle
@@ -128,9 +129,24 @@ async def plivo_audio_stream(
     await ws.accept()
     logger.info("Plivo audio stream connected: conv=%s, lang=%s, speaker=%s", conv_id, language, speaker)
 
+    # Fetch tenant name and AI prompt from DB
+    tenant_name = "Demo Corp"
+    tenant_system_prompt: str | None = None
+    if tenant_id:
+        try:
+            async with async_session_factory() as db:
+                tenant = (await db.execute(select(Tenant).where(Tenant.id == _uuid.UUID(tenant_id)))).scalar_one_or_none()
+                if tenant:
+                    tenant_name = tenant.name
+                    if tenant.config:
+                        tenant_system_prompt = tenant.config.get("ai_system_prompt")
+        except Exception:
+            logger.warning("Failed to fetch tenant %s, using defaults", tenant_id)
+
     session = VoiceAISession(
         tenant_id=tenant_id, conv_id=conv_id,
         language=language, speaker=speaker,
+        tenant_name=tenant_name, system_prompt=tenant_system_prompt,
     )
 
     # Register session for supervisor listen/whisper/barge
