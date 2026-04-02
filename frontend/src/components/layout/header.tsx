@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useAtomValue } from 'jotai'
 import { Phone } from 'lucide-react'
-import { wsConnectedAtom } from '@/stores/ws'
+import { isConnectedAtom } from '@/stores/auth'
 import { cn } from '@/lib/utils'
 import { TenantSelector } from './tenant-selector'
 
 export function Header() {
-  const wsConnected = useAtomValue(wsConnectedAtom)
+  const isConnected = useAtomValue(isConnectedAtom)
   const [clock, setClock] = useState(new Date())
 
   useEffect(() => {
@@ -35,11 +35,11 @@ export function Header() {
           <div
             className={cn(
               'size-2 rounded-full',
-              wsConnected ? 'bg-green-500' : 'bg-red-500'
+              isConnected ? 'bg-green-500' : 'bg-red-500'
             )}
           />
           <span className="text-xs text-gray-500">
-            {wsConnected ? 'Connected' : 'Disconnected'}
+            {isConnected ? 'Connected' : 'Disconnected'}
           </span>
         </div>
 

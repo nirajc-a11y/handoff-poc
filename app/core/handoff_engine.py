@@ -15,6 +15,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.ai_engine import AIEngine, ai_engine
 from app.core.context_builder import ContextBuilder, context_builder
@@ -614,6 +615,7 @@ class HandoffEngine:
         """Load a conversation row with ``SELECT ... FOR UPDATE``."""
         stmt = (
             select(Conversation)
+            .options(selectinload(Conversation.channel_sessions))
             .where(Conversation.id == conversation_id)
             .with_for_update()
         )
