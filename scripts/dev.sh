@@ -109,11 +109,8 @@ if [ "$SKIP_NGROK" = false ]; then
   sed -i "s|^BASE_WEBHOOK_URL=.*|BASE_WEBHOOK_URL=${NGROK_URL}|" .env
   info "Updated BASE_WEBHOOK_URL in .env"
 
-  # ── 5. Update Plivo webhooks ─────────────────────────────
-  if grep -qE "^PLIVO_AUTH_ID=.+" .env; then
-    warn "Updating Plivo application webhooks..."
-    python -m scripts.update_webhooks --url "$NGROK_URL" 2>&1 | sed 's/^/     /'
-  fi
+  # ── 5. Plivo webhooks — skipped (static ngrok domain, already configured)
+  # To force-update: python -m scripts.update_webhooks --url "$NGROK_URL"
 fi
 
 # ── 6. Backend ───────────────────────────────────────────────
