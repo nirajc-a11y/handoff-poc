@@ -1,19 +1,23 @@
-# In-process async event bus with glob-style topic matching.
-# Subscribers register a fnmatch pattern; publish fans out to all matches.
+"""Async event bus backed by Redis Pub/Sub.
+
+Public API is unchanged from the original in-process version:
+    event_bus.publish(event)   — serialises & publishes to Redis channel
+    event_bus.subscribe(...)   — only used by WSBroadcaster (kept for compat)
+
+The WSBroadcaster now uses `RedisSubscriber` to listen via Redis psubscribe.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from fnmatch import fnmatch
-from typing import Awaitable, Callable
 from uuid import UUID, uuid4
 
-logger = logging.getLogger(__name__)
+from app.core.redis import get_redis
 
-Subscriber = Callable[["Event"], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,32 +28,39 @@ class Event:
     event_id: UUID = field(default_factory=uuid4)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "topic": self.topic,
+                "tenant_id": str(self.tenant_id),
+                "payload": self.payload,
+                "event_id": str(self.event_id),
+                "timestamp": self.timestamp.isoformat(),
+            }
+        )
+
+    @classmethod
+    def from_json(cls, raw: str) -> "Event":
+        d = json.loads(raw)
+        return cls(
+            topic=d["topic"],
+            tenant_id=UUID(d["tenant_id"]),
+            payload=d["payload"],
+            event_id=UUID(d["event_id"]),
+            timestamp=datetime.fromisoformat(d["timestamp"]),
+        )
+
 
 class EventBus:
-    def __init__(self) -> None:
-        self._subscribers: list[tuple[str, Subscriber]] = []
-
-    def subscribe(self, topic_pattern: str, handler: Subscriber) -> None:
-        self._subscribers.append((topic_pattern, handler))
+    """Publishes events to Redis Pub/Sub channels."""
 
     async def publish(self, event: Event) -> None:
-        tasks: list[asyncio.Task] = []
-        for pattern, handler in self._subscribers:
-            if fnmatch(event.topic, pattern):
-                tasks.append(asyncio.create_task(self._safe_call(handler, event)))
-        if tasks:
-            await asyncio.gather(*tasks)
-
-    @staticmethod
-    async def _safe_call(handler: Subscriber, event: Event) -> None:
         try:
-            await handler(event)
+            r = get_redis()
+            await r.publish(event.topic, event.to_json())
         except Exception:
             logger.exception(
-                "Event handler %s failed for topic %r (event_id=%s)",
-                handler.__qualname__,
-                event.topic,
-                event.event_id,
+                "Failed to publish event %s (topic=%s)", event.event_id, event.topic
             )
 
 

@@ -9,7 +9,6 @@ export function useAgents() {
   return useQuery<Agent[]>({
     queryKey: ['agents', tenantId],
     queryFn: () => api.get('/agents'),
-    refetchInterval: 10_000,
     enabled: !!tenantId,
   })
 }

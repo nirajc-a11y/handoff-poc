@@ -31,6 +31,7 @@ from app.db.models.tenant import Tenant
 from app.voice_ai.voice_agent import VoiceAISession
 from app.voice_ai import session_registry
 from app.voice_ai.session_registry import SessionHandle
+from app.voice_ai.plivo_livekit_bridge import PlivoLiveKitBridge
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,13 @@ async def plivo_audio_stream(
     """Bidirectional audio stream from Plivo <Stream>."""
     await ws.accept()
     logger.info("Plivo audio stream connected: conv=%s, lang=%s, speaker=%s", conv_id, language, speaker)
+
+    # ---- LiveKit Agent path (feature-flagged) ----
+    if settings.use_livekit_agent and settings.livekit_url:
+        await _handle_livekit_bridge(ws, tenant_id=tenant_id, conv_id=conv_id, language=language)
+        return
+
+    # ---- Legacy VoiceAISession path ----
 
     # Fetch tenant name and AI prompt from DB
     tenant_name = "Demo Corp"
@@ -403,3 +411,80 @@ async def plivo_audio_stream(
         if conv_id:
             session_registry.unregister(conv_id)
         logger.info("Audio stream ended: conv=%s, turns=%d", conv_id, session.turn_count)
+
+
+# ======================================================================
+# LiveKit bridge path
+# ======================================================================
+
+async def _handle_livekit_bridge(
+    ws: WebSocket,
+    *,
+    tenant_id: str,
+    conv_id: str,
+    language: str,
+) -> None:
+    """Handle a Plivo audio stream by bridging into a LiveKit room.
+
+    The LiveKit Agent (livekit_agent.py) auto-joins the room and
+    handles STT -> LLM -> TTS. This function just shuttles audio
+    between Plivo and LiveKit.
+    """
+    # Fetch tenant name for room metadata
+    company_name = "Demo Corp"
+    if tenant_id:
+        try:
+            async with async_session_factory() as db:
+                tenant = (await db.execute(
+                    select(Tenant).where(Tenant.id == _uuid.UUID(tenant_id))
+                )).scalar_one_or_none()
+                if tenant:
+                    company_name = tenant.name
+        except Exception:
+            logger.warning("Failed to fetch tenant %s for LiveKit bridge", tenant_id)
+
+    bridge = PlivoLiveKitBridge(
+        conversation_id=conv_id,
+        tenant_id=tenant_id,
+        language=language,
+        company_name=company_name,
+        plivo_ws_send=ws.send_json,
+    )
+
+    try:
+        await bridge.start()
+
+        while True:
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=60.0)
+            except asyncio.TimeoutError:
+                logger.warning("Plivo stream timeout (LiveKit bridge): conv=%s", conv_id)
+                break
+
+            msg = json.loads(data)
+            event_type = msg.get("event", "")
+
+            if event_type == "start":
+                start_data = msg.get("start", {})
+                stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
+                bridge.update_stream_sid(stream_sid)
+                logger.info("LiveKit bridge stream started: sid=%s, room=%s", stream_sid, bridge.room_name)
+                # Stream greeting immediately — don't wait for agent to join
+                asyncio.create_task(bridge.stream_greeting())
+
+            elif event_type == "media":
+                payload = msg.get("media", {}).get("payload", "")
+                if payload:
+                    audio_bytes = base64.b64decode(payload)
+                    await bridge.feed_audio(audio_bytes)
+
+            elif event_type == "stop":
+                logger.info("LiveKit bridge stream stopped: conv=%s", conv_id)
+                break
+
+    except WebSocketDisconnect:
+        logger.info("Plivo stream disconnected (LiveKit bridge): conv=%s", conv_id)
+    except Exception:
+        logger.exception("Error in LiveKit bridge: conv=%s", conv_id)
+    finally:
+        await bridge.stop()

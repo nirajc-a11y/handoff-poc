@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.events import Event, event_bus
 from app.dependencies import get_db, get_tenant_id
 from app.services.agent_service import agent_service
 
@@ -126,7 +127,15 @@ async def update_agent_status(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return _agent_status_to_dict(agent_status)
+    result = _agent_status_to_dict(agent_status)
+
+    await event_bus.publish(Event(
+        topic="agent.status_changed",
+        tenant_id=tenant_id,
+        payload=result,
+    ))
+
+    return result
 
 
 @router.get("/{agent_id}/stats")

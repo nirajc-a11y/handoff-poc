@@ -6,5 +6,5 @@ import type { QueueStats } from '@/lib/types'
 
 export function useQueueStats() {
   const tenantId = useAtomValue(tenantIdAtom)
-  return useQuery<QueueStats>({ queryKey: ['queue-stats', tenantId], queryFn: () => api.get('/handoffs/queue/stats'), refetchInterval: 5000, enabled: !!tenantId })
+  return useQuery<QueueStats>({ queryKey: ['queue-stats', tenantId], queryFn: () => api.get('/handoffs/queue/stats'), enabled: !!tenantId })
 }

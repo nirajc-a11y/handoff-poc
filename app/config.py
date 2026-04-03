@@ -22,10 +22,14 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_number: str = ""  # The Twilio phone number (e.g. "+14155551234")
 
-    # LiveKit (unused — kept so .env values don't break pydantic-settings)
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # LiveKit
     livekit_url: str = ""
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
+    use_livekit_agent: bool = False
 
     # Sarvam AI (Indian language STT/TTS)
     sarvam_api_key: str = ""

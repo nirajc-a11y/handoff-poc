@@ -20,6 +20,11 @@ dependencies = [
     "silero-vad>=5.1",
     "onnxruntime>=1.17.0",
     "numpy>=1.26.0",
+    "redis[hiredis]>=5.0",
+    "livekit>=1.0",
+    "livekit-agents>=1.0",
+    "livekit-plugins-deepgram>=1.0",
+    "livekit-plugins-silero>=1.0",
 ]
 
 [project.optional-dependencies]

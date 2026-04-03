@@ -3,7 +3,7 @@ import { useMutation } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 
 // ---------------------------------------------------------------------------
-// Listen — stream live audio from an active call
+// LiveKit Listen — join the LiveKit room and auto-play audio
 // ---------------------------------------------------------------------------
 
 interface ListenState {
@@ -13,26 +13,51 @@ interface ListenState {
 
 export function useSupervisorListen(convId: string | null) {
   const [state, setState] = useState<ListenState>({ isListening: false, error: null })
+  const roomRef = useRef<any>(null)
+  // Legacy fallback refs
   const wsRef = useRef<WebSocket | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const nextPlayTimeRef = useRef(0)
 
-  const startListening = useCallback(() => {
-    if (!convId || wsRef.current) return
+  const startListening = useCallback(async () => {
+    if (!convId) return
 
+    // Try LiveKit first
+    try {
+      const tokenRes = await api.post<{ token: string; url: string; room: string }>(
+        `/supervisor/livekit-token/${convId}`,
+        { mode: 'listen' },
+      )
+
+      // Dynamically import livekit-client
+      const { Room, RoomEvent } = await import('livekit-client')
+      const room = new Room()
+      roomRef.current = room
+
+      room.on(RoomEvent.Disconnected, () => {
+        setState({ isListening: false, error: null })
+        roomRef.current = null
+      })
+
+      await room.connect(tokenRes.url, tokenRes.token)
+      setState({ isListening: true, error: null })
+      return
+    } catch {
+      // LiveKit not available, fall back to legacy WebSocket
+    }
+
+    // Legacy WebSocket fallback
+    if (wsRef.current) return
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const url = `${proto}://${window.location.host}/api/v1/supervisor/listen/${convId}`
     const ws = new WebSocket(url)
     wsRef.current = ws
 
-    // Web Audio API — schedule buffers sequentially to avoid overlaps/gaps
     const audioCtx = new AudioContext({ sampleRate: 8000 })
     audioCtxRef.current = audioCtx
     nextPlayTimeRef.current = 0
 
-    ws.onopen = () => {
-      setState({ isListening: true, error: null })
-    }
+    ws.onopen = () => setState({ isListening: true, error: null })
 
     ws.onmessage = (evt) => {
       try {
@@ -44,15 +69,11 @@ export function useSupervisorListen(convId: string | null) {
           return
         }
 
-        // Decode base64 mulaw
         const raw = atob(data.audio)
         const mulaw = new Uint8Array(raw.length)
         for (let i = 0; i < raw.length; i++) mulaw[i] = raw.charCodeAt(i)
 
-        // Convert mulaw -> PCM float32
         const pcm = decodeMulaw(mulaw)
-
-        // Create audio buffer and schedule it after the previous one
         const buffer = audioCtx.createBuffer(1, pcm.length, 8000)
         buffer.getChannelData(0).set(pcm)
         const source = audioCtx.createBufferSource()
@@ -68,10 +89,7 @@ export function useSupervisorListen(convId: string | null) {
       }
     }
 
-    ws.onerror = () => {
-      setState({ isListening: false, error: 'WebSocket connection failed' })
-    }
-
+    ws.onerror = () => setState({ isListening: false, error: 'WebSocket connection failed' })
     ws.onclose = () => {
       setState((s) => ({ ...s, isListening: false }))
       wsRef.current = null
@@ -79,6 +97,12 @@ export function useSupervisorListen(convId: string | null) {
   }, [convId])
 
   const stopListening = useCallback(() => {
+    // LiveKit cleanup
+    if (roomRef.current) {
+      roomRef.current.disconnect()
+      roomRef.current = null
+    }
+    // Legacy cleanup
     wsRef.current?.close()
     wsRef.current = null
     audioCtxRef.current?.close()
@@ -87,9 +111,10 @@ export function useSupervisorListen(convId: string | null) {
     setState({ isListening: false, error: null })
   }, [])
 
-  // Clean up on unmount or convId change
   useEffect(() => {
     return () => {
+      roomRef.current?.disconnect()
+      roomRef.current = null
       wsRef.current?.close()
       wsRef.current = null
       audioCtxRef.current?.close()
@@ -101,25 +126,33 @@ export function useSupervisorListen(convId: string | null) {
 }
 
 // ---------------------------------------------------------------------------
-// Whisper — send guidance to AI
+// Whisper — send guidance to AI (LiveKit data channel or legacy HTTP)
 // ---------------------------------------------------------------------------
 
 export function useSupervisorWhisper(convId: string | null) {
   return useMutation({
     mutationFn: async (message: string) => {
       if (!convId) throw new Error('No conversation selected')
-      return api.post(`/supervisor/whisper/${convId}`, { message })
+      // Try LiveKit whisper first, fall back to legacy
+      try {
+        return await api.post(`/supervisor/livekit-whisper/${convId}`, { message })
+      } catch {
+        return api.post(`/supervisor/whisper/${convId}`, { message })
+      }
     },
   })
 }
 
 // ---------------------------------------------------------------------------
-// Barge — take over call
+// Barge — take over call (LiveKit or legacy)
 // ---------------------------------------------------------------------------
 
 interface BargeResult {
   status: string
-  conference_name: string
+  conference_name?: string
+  token?: string
+  url?: string
+  room?: string
   message: string
 }
 
@@ -127,13 +160,26 @@ export function useSupervisorBarge(convId: string | null) {
   return useMutation({
     mutationFn: async (): Promise<BargeResult> => {
       if (!convId) throw new Error('No conversation selected')
-      return api.post(`/supervisor/barge/${convId}`)
+      // Try LiveKit barge first, fall back to legacy
+      try {
+        const result = await api.post<BargeResult>(`/supervisor/livekit-barge/${convId}`)
+        // If LiveKit barge returns a token, connect to room with mic
+        if (result.token && result.url) {
+          const { Room } = await import('livekit-client')
+          const room = new Room()
+          await room.connect(result.url, result.token)
+          await room.localParticipant.setMicrophoneEnabled(true)
+        }
+        return result
+      } catch {
+        return api.post(`/supervisor/barge/${convId}`)
+      }
     },
   })
 }
 
 // ---------------------------------------------------------------------------
-// Mulaw decoder (ITU G.711 mu-law -> Float32 PCM)
+// Mulaw decoder (legacy fallback — ITU G.711 mu-law -> Float32 PCM)
 // ---------------------------------------------------------------------------
 
 const MULAW_BIAS = 33

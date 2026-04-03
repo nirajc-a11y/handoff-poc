@@ -7,7 +7,6 @@ export function useMessages(conversationId: string | null) {
     queryKey: ['messages', conversationId],
     queryFn: () => api.get(`/conversations/${conversationId}/messages`),
     enabled: !!conversationId,
-    refetchInterval: 3000,
   })
 }
 

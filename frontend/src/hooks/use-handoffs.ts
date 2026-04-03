@@ -26,7 +26,6 @@ export function useHandoffQueue() {
   return useQuery<Conversation[]>({
     queryKey: ['handoff-queue', tenantId],
     queryFn: () => api.get('/handoffs/queue'),
-    refetchInterval: 5000,
     enabled: !!tenantId,
   })
 }

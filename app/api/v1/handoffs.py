@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.events import Event, event_bus
 from app.core.handoff_engine import ConversationNotFoundError, handoff_engine
 from app.core.state_machine import StateMachineError, Trigger
 from app.dependencies import get_db, get_tenant_id
@@ -62,6 +63,16 @@ def _conversation_to_dict(conv) -> dict:
     }
 
 
+async def _publish_queue_stats(db: AsyncSession, tenant_id: UUID) -> None:
+    """Fetch current queue stats and push via event bus."""
+    stats = await handoff_service.get_queue_stats(db=db, tenant_id=tenant_id)
+    await event_bus.publish(Event(
+        topic="queue.stats_updated",
+        tenant_id=tenant_id,
+        payload=stats,
+    ))
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -91,6 +102,7 @@ async def escalate_to_human(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    await _publish_queue_stats(db, tenant_id)
     return _conversation_to_dict(conversation)
 
 
@@ -114,6 +126,7 @@ async def transfer_to_agent(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    await _publish_queue_stats(db, tenant_id)
     return _conversation_to_dict(conversation)
 
 
@@ -136,6 +149,7 @@ async def ivr_skip_to_human(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    await _publish_queue_stats(db, tenant_id)
     return _conversation_to_dict(conversation)
 
 

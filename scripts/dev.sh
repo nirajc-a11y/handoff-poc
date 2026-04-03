@@ -42,9 +42,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── 1. PostgreSQL ────────────────────────────────────────────
-info "Starting PostgreSQL..."
-docker compose up -d postgres
+# ── 1. PostgreSQL + Redis + LiveKit ─────────────────────────
+info "Starting PostgreSQL, Redis, and LiveKit..."
+docker compose up -d postgres redis livekit
 
 # Wait for it to accept connections (max 30s)
 for i in $(seq 1 30); do
@@ -57,7 +57,7 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
-info "PostgreSQL is ready."
+info "PostgreSQL is ready. Redis and LiveKit starting in background."
 
 # ── 2. Seed (optional) ──────────────────────────────────────
 if [ "$SEED" = true ]; then
@@ -127,10 +127,21 @@ for i in $(seq 1 15); do
 done
 info "Backend is ready."
 
-# ── 7. Frontend ──────────────────────────────────────────────
-info "Starting frontend (pnpm dev :5173)..."
-(cd frontend && pnpm dev) &
-PIDS+=($!)
+# ── 7. LiveKit Agent worker ─────────────────────────────────
+USE_LK=$(grep -E "^USE_LIVEKIT_AGENT=" .env 2>/dev/null | sed 's/^USE_LIVEKIT_AGENT=//' | tr -d '"' | tr -d "'" | tr '[:upper:]' '[:lower:]')
+if [ "$USE_LK" = "true" ]; then
+  info "Starting LiveKit agent worker..."
+  python -m app.voice_ai.livekit_agent dev &
+  PIDS+=($!)
+  info "LiveKit agent worker started."
+else
+  warn "LiveKit agent disabled (USE_LIVEKIT_AGENT!=true). Using legacy voice pipeline."
+fi
+
+# ── 8. Frontend ──────────────────────────────────────────────
+# info "Starting frontend (pnpm dev :5173)..."
+# (cd frontend && pnpm dev) &
+# PIDS+=($!)
 
 # ── Summary ──────────────────────────────────────────────────
 sleep 2
@@ -141,8 +152,15 @@ echo -e "${G}══════════════════════�
 echo -e "  Frontend:  ${C}http://localhost:5173${NC}"
 echo -e "  Backend:   ${C}http://localhost:8000${NC}"
 echo -e "  Swagger:   ${C}http://localhost:8000/docs${NC}"
+echo -e "  Redis:     ${C}localhost:6379${NC}"
+echo -e "  LiveKit:   ${C}ws://localhost:7880${NC}"
 if [ -n "$NGROK_URL" ]; then
 echo -e "  ngrok:     ${C}${NGROK_URL}${NC}"
+fi
+if [ "$USE_LK" = "true" ]; then
+echo -e "  Voice AI:  ${G}LiveKit Agent${NC}"
+else
+echo -e "  Voice AI:  ${Y}Legacy (VoiceAISession)${NC}"
 fi
 echo -e "${G}══════════════════════════════════════════${NC}"
 echo -e "  Press ${Y}Ctrl+C${NC} to stop all services"

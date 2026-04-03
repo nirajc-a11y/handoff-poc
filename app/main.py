@@ -1,15 +1,20 @@
 from contextlib import asynccontextmanager
 import logging
 import os
+import warnings
+
+# Suppress pydantic "model_" namespace warnings from livekit-agents internals
+warnings.filterwarnings("ignore", message=".*Field.*model_.*protected namespace.*")
 
 # Ensure application logs are visible in the terminal
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.core.events import event_bus
+from app.core.redis import close_redis
 from app.db.engine import engine
 from app.providers.registry import provider_registry
 from app.ws.broadcaster import WSBroadcaster
@@ -24,8 +29,8 @@ os.makedirs(_recordings_dir, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: wire broadcaster to event bus
-    broadcaster = WSBroadcaster(event_bus, ws_manager)
+    # Startup: wire broadcaster to Redis pub/sub -> WebSocket
+    broadcaster = WSBroadcaster(ws_manager)
     broadcaster.start()
 
     # Register Plivo provider if credentials are configured
@@ -57,10 +62,19 @@ async def lifespan(app: FastAPI):
     _get_model_path()
     logger.info("Silero VAD model pre-loaded")
 
+    # Log LiveKit agent status
+    if settings.use_livekit_agent and settings.livekit_url:
+        logger.info(
+            "LiveKit agent mode enabled — run the agent worker separately with: "
+            "python -m app.voice_ai.livekit_agent"
+        )
+
     yield
     # Shutdown
+    await broadcaster.stop()
     from app.voice_ai import sarvam
     await sarvam.close_client()
+    await close_redis()
     await engine.dispose()
 
 

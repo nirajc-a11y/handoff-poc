@@ -9,7 +9,6 @@ export function useActiveConversations() {
   return useQuery<Conversation[]>({
     queryKey: ['conversations', tenantId, 'active'],
     queryFn: () => api.get('/conversations/active'),
-    refetchInterval: 10_000,
     enabled: !!tenantId,
   })
 }

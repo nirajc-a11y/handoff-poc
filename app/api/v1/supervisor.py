@@ -15,6 +15,9 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from livekit import api as lk_api
+from livekit.protocol import models as lk_models
+
 from app.config import settings
 from app.core.handoff_engine import handoff_engine
 from app.core.state_machine import ConversationState, StateMachineError, Trigger
@@ -228,3 +231,150 @@ async def list_active_sessions():
                 "listener_count": len(handle.listeners),
             })
     return sessions
+
+
+# ======================================================================
+# LiveKit-based supervisor endpoints (used when use_livekit_agent=True)
+# ======================================================================
+
+
+class LiveKitTokenMode(BaseModel):
+    """Requested mode determines room permissions."""
+    mode: str = "listen"  # "listen" or "barge"
+
+
+@router.post("/livekit-token/{conv_id}")
+async def get_livekit_token(conv_id: str, body: LiveKitTokenMode | None = None):
+    """Generate a LiveKit room token for supervisor to join the call room.
+
+    - listen mode: subscribe-only (can hear, can't speak)
+    - barge mode: can subscribe + publish (can speak into the room)
+    """
+    if not settings.livekit_url or not settings.use_livekit_agent:
+        raise HTTPException(400, "LiveKit is not enabled")
+
+    mode = (body.mode if body else "listen") or "listen"
+    can_publish = mode == "barge"
+
+    token = lk_api.AccessToken(
+        api_key=settings.livekit_api_key,
+        api_secret=settings.livekit_api_secret,
+    )
+    token.with_identity(f"supervisor-{conv_id[:8]}")
+    token.with_name("Supervisor")
+    token.with_grants(
+        lk_api.VideoGrants(
+            room_join=True,
+            room=f"room-{conv_id}",
+            can_publish=can_publish,
+            can_subscribe=True,
+            can_publish_data=True,  # Always allow data messages (for whisper)
+        )
+    )
+
+    return {
+        "token": token.to_jwt(),
+        "url": settings.livekit_url,
+        "room": f"room-{conv_id}",
+        "mode": mode,
+    }
+
+
+@router.post("/livekit-whisper/{conv_id}")
+async def livekit_whisper(conv_id: str, body: WhisperRequest):
+    """Send a whisper message via LiveKit data channel.
+
+    The LiveKit Agent subscribes to data messages and injects
+    whisper hints as system context for the next LLM turn.
+    """
+    if not settings.livekit_url or not settings.use_livekit_agent:
+        raise HTTPException(400, "LiveKit is not enabled")
+
+    room_api = lk_api.LiveKitAPI(
+        url=settings.livekit_url,
+        api_key=settings.livekit_api_key,
+        api_secret=settings.livekit_api_secret,
+    )
+    try:
+        await room_api.room.send_data(
+            lk_api.SendDataRequest(
+                room=f"room-{conv_id}",
+                data=json.dumps({"type": "whisper", "message": body.message}).encode(),
+                kind=lk_models.DataPacket.RELIABLE,
+            )
+        )
+    finally:
+        await room_api.aclose()
+
+    logger.info("LiveKit whisper sent: conv=%s, hint='%s'", conv_id, body.message[:80])
+    return {"status": "ok", "message": "Whisper sent via LiveKit data channel"}
+
+
+@router.post("/livekit-barge/{conv_id}")
+async def livekit_barge(conv_id: str):
+    """Supervisor barge via LiveKit: mute the AI agent, transition state.
+
+    1. Send barge data message to mute the agent
+    2. Transition state to HUMAN_HANDLING
+    3. Return room token with publish permissions so supervisor can speak
+    """
+    if not settings.livekit_url or not settings.use_livekit_agent:
+        raise HTTPException(400, "LiveKit is not enabled")
+
+    # 1. Send barge signal via data message
+    room_api = lk_api.LiveKitAPI(
+        url=settings.livekit_url,
+        api_key=settings.livekit_api_key,
+        api_secret=settings.livekit_api_secret,
+    )
+    try:
+        await room_api.room.send_data(
+            lk_api.SendDataRequest(
+                room=f"room-{conv_id}",
+                data=json.dumps({"type": "barge"}).encode(),
+                kind=lk_models.DataPacket.RELIABLE,
+            )
+        )
+    finally:
+        await room_api.aclose()
+
+    # 2. State transition
+    async with async_session_factory() as db:
+        conv_uuid = _uuid.UUID(conv_id)
+        for trigger in (Trigger.AI_TRANSFER, Trigger.AGENT_ASSIGNED):
+            try:
+                await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conv_uuid,
+                    trigger=trigger,
+                    metadata={"reason": "Supervisor barge-in via LiveKit", "handler": "supervisor"},
+                )
+            except StateMachineError:
+                logger.info("LiveKit barge: skipping %s for conv=%s", trigger.value, conv_id)
+        await db.commit()
+
+    # 3. Return a publish-enabled token
+    token = lk_api.AccessToken(
+        api_key=settings.livekit_api_key,
+        api_secret=settings.livekit_api_secret,
+    )
+    token.with_identity(f"supervisor-barge-{conv_id[:8]}")
+    token.with_name("Supervisor (Barge)")
+    token.with_grants(
+        lk_api.VideoGrants(
+            room_join=True,
+            room=f"room-{conv_id}",
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True,
+        )
+    )
+
+    logger.info("LiveKit barge complete: conv=%s", conv_id)
+    return {
+        "status": "ok",
+        "token": token.to_jwt(),
+        "url": settings.livekit_url,
+        "room": f"room-{conv_id}",
+        "message": "AI agent muted. Join room with the provided token to speak.",
+    }
