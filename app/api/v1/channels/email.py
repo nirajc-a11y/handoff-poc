@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/channels/email", tags=["email"])
 # ---------------------------------------------------------------------------
 
 class InboundEmailRequest(BaseModel):
-    from_address: str
+    from_address: EmailStr
     to_address: str
     subject: str
     body_html: str

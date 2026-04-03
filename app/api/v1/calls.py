@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +16,7 @@ from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.models.lead import Lead
 from app.db.models.user import AgentProfile
 from app.dependencies import get_current_user_id, get_db, get_tenant_id
+from app.schemas import ConversationResponse, PhoneNumber
 from app.services.call_service import call_service
 from app.services.campaign_service import campaign_service
 
@@ -26,7 +29,7 @@ router = APIRouter(prefix="/calls", tags=["calls"])
 
 
 class OutboundCallRequest(BaseModel):
-    to_number: str
+    to_number: PhoneNumber
     customer_name: str | None = None
     lead_id: UUID | None = None
     campaign_lead_id: UUID | None = None
@@ -49,7 +52,7 @@ class TransferRequest(BaseModel):
 
 
 class DtmfRequest(BaseModel):
-    digit: str
+    digit: Annotated[str, Field(pattern=r"^[0-9*#]$")]
 
 
 # ---------------------------------------------------------------------------
@@ -57,27 +60,8 @@ class DtmfRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _conversation_to_dict(conv) -> dict:
-    return {
-        "id": str(conv.id),
-        "tenant_id": str(conv.tenant_id),
-        "channel": conv.channel,
-        "direction": conv.direction,
-        "state": conv.state,
-        "sub_state": conv.sub_state,
-        "customer_identifier": conv.customer_identifier,
-        "customer_name": conv.customer_name,
-        "current_handler_type": conv.current_handler_type,
-        "current_handler_id": str(conv.current_handler_id) if conv.current_handler_id else None,
-        "lead_id": str(conv.lead_id) if conv.lead_id else None,
-        "campaign_lead_id": str(conv.campaign_lead_id) if conv.campaign_lead_id else None,
-        "started_at": conv.started_at.isoformat() if conv.started_at else None,
-        "answered_at": conv.answered_at.isoformat() if conv.answered_at else None,
-        "ended_at": conv.ended_at.isoformat() if conv.ended_at else None,
-        "duration_seconds": conv.duration_seconds,
-        "disposition": conv.disposition,
-        "recording_url": conv.recording_url,
-    }
+def _conversation_response(conv) -> dict:
+    return ConversationResponse.model_validate(conv).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +96,7 @@ async def initiate_outbound_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/outbound/campaign")
@@ -166,7 +150,7 @@ async def initiate_campaign_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/inbound/webhook")
@@ -194,7 +178,7 @@ async def inbound_webhook(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/answer")
@@ -215,7 +199,7 @@ async def answer_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.get("/{conversation_id}")
@@ -233,7 +217,7 @@ async def get_call(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Call not found")
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/hold")
@@ -254,7 +238,7 @@ async def hold_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/unhold")
@@ -275,7 +259,7 @@ async def unhold_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/transfer")
@@ -304,7 +288,7 @@ async def transfer_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/end")
@@ -320,7 +304,7 @@ async def end_call(
             raise HTTPException(status_code=404, detail="Call not found")
         # If already ENDED, nothing to do
         if conversation.state == ConversationState.ENDED:
-            return _conversation_to_dict(conversation)
+            return _conversation_response(conversation)
         # If already in WRAP_UP (e.g. AI resolved / customer disconnected), skip AGENT_END
         if conversation.state != ConversationState.WRAP_UP:
             conversation = await handoff_engine.process_trigger(
@@ -340,7 +324,7 @@ async def end_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/force-end")
@@ -368,7 +352,7 @@ async def force_end_call(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/{conversation_id}/dtmf")
@@ -398,4 +382,4 @@ async def dtmf_input(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)

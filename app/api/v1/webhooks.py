@@ -15,6 +15,7 @@ from app.core.state_machine import StateMachineError, Trigger
 from app.db.models.channel_session import ChannelSession
 from app.dependencies import get_db
 from app.providers.base import CallState
+from app.schemas import TelephonyProviderEnum
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def _find_session(
 
 @router.post("/telephony/{provider}")
 async def telephony_webhook(
-    provider: str,
+    provider: TelephonyProviderEnum,
     payload: dict,
     db: AsyncSession = Depends(get_db),
 ):

@@ -12,6 +12,7 @@ from app.core.events import Event, event_bus
 from app.core.handoff_engine import ConversationNotFoundError, handoff_engine
 from app.core.state_machine import StateMachineError, Trigger
 from app.dependencies import get_db, get_tenant_id
+from app.schemas import ConversationResponse
 from app.services.handoff_service import handoff_service
 
 router = APIRouter(prefix="/handoffs", tags=["handoffs"])
@@ -42,25 +43,8 @@ class IvrSkipRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _conversation_to_dict(conv) -> dict:
-    return {
-        "id": str(conv.id),
-        "tenant_id": str(conv.tenant_id),
-        "channel": conv.channel,
-        "direction": conv.direction,
-        "state": conv.state,
-        "sub_state": conv.sub_state,
-        "customer_identifier": conv.customer_identifier,
-        "customer_name": conv.customer_name,
-        "current_handler_type": conv.current_handler_type,
-        "current_handler_id": str(conv.current_handler_id) if conv.current_handler_id else None,
-        "queue_priority": conv.queue_priority,
-        "queue_entered_at": conv.queue_entered_at.isoformat() if conv.queue_entered_at else None,
-        "ai_escalation_reason": conv.ai_escalation_reason,
-        "recording_url": conv.recording_url,
-        "started_at": conv.started_at.isoformat() if conv.started_at else None,
-        "created_at": conv.created_at.isoformat() if conv.created_at else None,
-    }
+def _conversation_response(conv) -> dict:
+    return ConversationResponse.model_validate(conv).model_dump()
 
 
 async def _publish_queue_stats(db: AsyncSession, tenant_id: UUID) -> None:
@@ -103,7 +87,7 @@ async def escalate_to_human(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await _publish_queue_stats(db, tenant_id)
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/transfer")
@@ -127,7 +111,7 @@ async def transfer_to_agent(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await _publish_queue_stats(db, tenant_id)
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.post("/ivr-skip")
@@ -150,7 +134,7 @@ async def ivr_skip_to_human(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await _publish_queue_stats(db, tenant_id)
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)
 
 
 @router.get("/queue")
@@ -163,7 +147,7 @@ async def get_queue(
         db=db,
         tenant_id=tenant_id,
     )
-    return [_conversation_to_dict(c) for c in conversations]
+    return [_conversation_response(c) for c in conversations]
 
 
 @router.get("/queue/stats")

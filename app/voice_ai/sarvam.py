@@ -41,6 +41,23 @@ async def close_client():
         _client = None
 
 
+# ---------------------------------------------------------------------------
+# Greeting TTS cache — avoids re-synthesizing the same greeting text
+# ---------------------------------------------------------------------------
+
+_greeting_cache: dict[str, list[bytes]] = {}
+
+
+def get_cached_greeting(text: str, language: str, speaker: str) -> list[bytes] | None:
+    key = f"{text[:50]}|{language}|{speaker}"
+    return _greeting_cache.get(key)
+
+
+def cache_greeting(text: str, language: str, speaker: str, chunks: list[bytes]) -> None:
+    key = f"{text[:50]}|{language}|{speaker}"
+    _greeting_cache[key] = chunks
+
+
 async def transcribe(audio_data: bytes, language: str = "en") -> str:
     """Transcribe audio using the best provider per language.
 

@@ -20,6 +20,7 @@ from livekit.protocol import models as lk_models
 
 from app.config import settings
 from app.core.handoff_engine import handoff_engine
+from app.schemas import SupervisorModeEnum
 from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
@@ -240,7 +241,7 @@ async def list_active_sessions():
 
 class LiveKitTokenMode(BaseModel):
     """Requested mode determines room permissions."""
-    mode: str = "listen"  # "listen" or "barge"
+    mode: SupervisorModeEnum = SupervisorModeEnum.listen
 
 
 @router.post("/livekit-token/{conv_id}")

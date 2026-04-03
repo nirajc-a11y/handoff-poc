@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
 import warnings
@@ -10,8 +11,11 @@ warnings.filterwarnings("ignore", message=".*Field.*model_.*protected namespace.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.core.redis import close_redis
@@ -29,6 +33,15 @@ os.makedirs(_recordings_dir, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Validate voice pipeline config (fail fast on fatal misconfig)
+    try:
+        config_warnings = settings.validate_voice_pipeline()
+        for w in config_warnings:
+            logger.warning("Config: %s", w)
+    except ValueError as exc:
+        logger.error("FATAL config error: %s", exc)
+        raise SystemExit(1) from exc
+
     # Startup: wire broadcaster to Redis pub/sub -> WebSocket
     broadcaster = WSBroadcaster(ws_manager)
     broadcaster.start()
@@ -69,13 +82,47 @@ async def lifespan(app: FastAPI):
             "python -m app.voice_ai.livekit_agent"
         )
 
+    # Start periodic cleanup of stale pre-warmed LiveKit rooms
+    _room_cleanup_task = None
+    if settings.use_livekit_agent and settings.livekit_url:
+        async def _periodic_room_cleanup():
+            from app.services.room_prewarmer import room_prewarmer
+            while True:
+                try:
+                    await asyncio.sleep(30)
+                    await room_prewarmer.cleanup_stale(max_age_seconds=60)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    logger.warning("Room cleanup error", exc_info=True)
+
+        _room_cleanup_task = asyncio.create_task(_periodic_room_cleanup())
+
     yield
-    # Shutdown
-    await broadcaster.stop()
-    from app.voice_ai import sarvam
-    await sarvam.close_client()
-    await close_redis()
-    await engine.dispose()
+    # Shutdown — try/finally ensures all cleanup runs even if one step fails
+    if _room_cleanup_task and not _room_cleanup_task.done():
+        _room_cleanup_task.cancel()
+        try:
+            await _room_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    try:
+        await broadcaster.stop()
+    except Exception:
+        logger.exception("Error stopping broadcaster")
+    try:
+        from app.voice_ai import sarvam
+        await sarvam.close_client()
+    except Exception:
+        logger.exception("Error closing Sarvam client")
+    try:
+        await close_redis()
+    except Exception:
+        logger.exception("Error closing Redis")
+    try:
+        await engine.dispose()
+    except Exception:
+        logger.exception("Error disposing DB engine")
 
 
 app = FastAPI(
@@ -91,3 +138,16 @@ app.mount("/recordings", StaticFiles(directory=_recordings_dir), name="recording
 from app.api.v1.router import v1_router  # noqa: E402
 
 app.include_router(v1_router, prefix="/api/v1")
+
+# Serve frontend SPA build (Railway / production)
+_frontend_dist = Path(__file__).resolve().parent.parent / "frontend_dist"
+if _frontend_dist.is_dir():
+    app.mount("/assets", StaticFiles(directory=_frontend_dist / "assets"), name="frontend-assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Catch-all: serve index.html for client-side routing."""
+        file = _frontend_dist / full_path
+        if file.is_file():
+            return FileResponse(file)
+        return FileResponse(_frontend_dist / "index.html")

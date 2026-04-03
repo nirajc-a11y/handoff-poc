@@ -7,6 +7,7 @@ Plivo uses XML responses (similar to Twilio's TwiML) with elements like
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -293,6 +294,32 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
 
         await db.commit()
 
+        # --- OPTIMIZATION: Pre-warm LiveKit room + greeting cache during IVR ---
+        # These run in background while caller navigates DTMF menu (~20s)
+        if settings.use_livekit_agent and settings.livekit_url:
+            import asyncio as _aio
+            from app.db.models.tenant import Tenant as _Tenant
+            tenant_result = await db.execute(
+                select(_Tenant.name, _Tenant.config).where(_Tenant.id == tenant_uuid)
+            )
+            tenant_row = tenant_result.first()
+            _company = tenant_row.name if tenant_row else "the company"
+            _tconfig = (tenant_row.config if tenant_row else None) or {}
+            _default_lang = _tconfig.get("default_language", "en")
+            _speaker = _tconfig.get("sarvam_speaker", "ritu")
+
+            async def _prewarm_pipeline():
+                from app.services.room_prewarmer import room_prewarmer
+                from app.services.greeting_cache import warm_greeting_cache
+                await asyncio.gather(
+                    room_prewarmer.prewarm(conv_id, tenant_id, _default_lang, _company),
+                    warm_greeting_cache(tenant_id, _default_lang, _company, _speaker),
+                    return_exceptions=True,
+                )
+
+            _aio.create_task(_prewarm_pipeline())
+            logger.info("Pre-warming LiveKit room + greeting cache for conv=%s", conv_id)
+
         # Start call-level recording for inbound calls
         if call_uuid and settings.plivo_auth_id:
             import asyncio as _aio
@@ -452,7 +479,14 @@ async def _handle_ai_handoff(
             f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"
         )
         escaped_url = _escape_xml(stream_url)
-        xml = f"""<Response>
+
+        # Play filler audio FIRST so caller hears something instantly
+        # instead of 4.5s silence while pipeline spins up
+        filler_xml = ""
+        if settings.plivo_filler_audio_url:
+            filler_xml = f'\n    <Play>{_escape_xml(settings.plivo_filler_audio_url)}</Play>'
+
+        xml = f"""<Response>{filler_xml}
     <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">{escaped_url}</Stream>
 </Response>"""
         return xml_response(xml)

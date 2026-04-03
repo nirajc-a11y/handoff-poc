@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models.ivr_menu import IVRMenu, IVRMenuOption
 from app.dependencies import get_db, get_tenant_id
+from app.schemas import IVRActionTypeEnum, IVRMenuOptionResponse, IVRMenuResponse
 
 router = APIRouter(prefix="/ivr", tags=["ivr"])
 
@@ -35,9 +38,9 @@ class IVRMenuUpdate(BaseModel):
 
 
 class IVRMenuOptionCreate(BaseModel):
-    digit: str
+    digit: Annotated[str, Field(pattern=r"^[0-9*#]$")]
     label: str | None = None
-    action_type: str  # submenu, ai_handoff, human_queue, play_message, hangup
+    action_type: IVRActionTypeEnum
     target_id: UUID | None = None
     target_config: dict | None = None
 
@@ -46,34 +49,28 @@ class IVRMenuOptionCreate(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _option_dict(opt: IVRMenuOption) -> dict:
-    return {
-        "id": str(opt.id),
-        "menu_id": str(opt.menu_id),
-        "digit": opt.digit,
-        "label": opt.label,
-        "action_type": opt.action_type,
-        "target_id": str(opt.target_id) if opt.target_id else None,
-        "target_config": opt.target_config,
-        "sort_order": opt.sort_order,
-        "created_at": opt.created_at.isoformat() if opt.created_at else None,
-    }
+def _option_response(opt: IVRMenuOption) -> dict:
+    return IVRMenuOptionResponse.model_validate(opt).model_dump()
 
 
-def _menu_dict(menu: IVRMenu, include_options: bool = False) -> dict:
-    d: dict = {
-        "id": str(menu.id),
-        "tenant_id": str(menu.tenant_id),
+def _menu_response(menu: IVRMenu, include_options: bool = False) -> dict:
+    # Build base dict to avoid lazy-loading options relationship in async context
+    data = {
+        "id": menu.id,
+        "tenant_id": menu.tenant_id,
         "name": menu.name,
         "is_root": menu.is_root,
         "welcome_message": menu.welcome_message,
         "config": menu.config,
-        "created_at": menu.created_at.isoformat() if menu.created_at else None,
-        "updated_at": menu.updated_at.isoformat() if menu.updated_at else None,
+        "options": [],
     }
     if include_options:
-        d["options"] = [_option_dict(o) for o in menu.options]
-    return d
+        try:
+            data["options"] = [_option_response(o) for o in menu.options]
+        except Exception:
+            data["options"] = []
+    resp = IVRMenuResponse.model_validate(data)
+    return resp.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +92,7 @@ async def list_menus(
     )
     result = await db.execute(stmt)
     menus = result.scalars().all()
-    return [_menu_dict(m) for m in menus]
+    return [_menu_response(m) for m in menus]
 
 
 @router.post("/menus")
@@ -114,7 +111,7 @@ async def create_menu(
     db.add(menu)
     await db.commit()
     await db.refresh(menu)
-    return _menu_dict(menu)
+    return _menu_response(menu)
 
 
 @router.get("/menus/{menu_id}")
@@ -136,7 +133,7 @@ async def get_menu(
     menu = result.scalar_one_or_none()
     if menu is None:
         raise HTTPException(status_code=404, detail="IVR menu not found")
-    return _menu_dict(menu, include_options=True)
+    return _menu_response(menu, include_options=True)
 
 
 @router.patch("/menus/{menu_id}")
@@ -165,7 +162,7 @@ async def update_menu(
 
     await db.commit()
     await db.refresh(menu)
-    return _menu_dict(menu)
+    return _menu_response(menu)
 
 
 @router.post("/menus/{menu_id}/options")
@@ -198,4 +195,4 @@ async def create_menu_option(
     db.add(option)
     await db.commit()
     await db.refresh(option)
-    return _option_dict(option)
+    return _option_response(option)

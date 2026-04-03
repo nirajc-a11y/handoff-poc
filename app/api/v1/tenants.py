@@ -9,13 +9,21 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.tenant import Tenant
 from app.db.models.user import AgentProfile, AgentStatus, User
 from app.dependencies import get_db
+from app.schemas import (
+    AgentProfileResponse,
+    NameStr,
+    SlugStr,
+    TenantResponse,
+    UserResponse,
+    UserRoleEnum,
+)
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -25,8 +33,8 @@ router = APIRouter(prefix="/tenants", tags=["tenants"])
 # ---------------------------------------------------------------------------
 
 class TenantCreate(BaseModel):
-    name: str
-    slug: str
+    name: NameStr
+    slug: SlugStr
     config: dict | None = None
 
 
@@ -37,9 +45,9 @@ class TenantUpdate(BaseModel):
 
 
 class UserCreate(BaseModel):
-    email: str
+    email: EmailStr
     name: str
-    role: str  # agent, supervisor, admin
+    role: UserRoleEnum
 
 
 class AgentCreate(BaseModel):
@@ -53,46 +61,19 @@ class AgentCreate(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tenant_dict(t: Tenant) -> dict:
-    return {
-        "id": str(t.id),
-        "name": t.name,
-        "slug": t.slug,
-        "status": t.status,
-        "config": t.config,
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
-    }
+def _tenant_response(t: Tenant) -> dict:
+    return TenantResponse.model_validate(t).model_dump()
 
 
-def _user_dict(u: User) -> dict:
-    return {
-        "id": str(u.id),
-        "tenant_id": str(u.tenant_id),
-        "email": u.email,
-        "name": u.name,
-        "role": u.role,
-        "is_active": u.is_active,
-        "created_at": u.created_at.isoformat() if u.created_at else None,
-    }
+def _user_response(u: User) -> dict:
+    return UserResponse.model_validate(u).model_dump()
 
 
-def _agent_profile_dict(ap: AgentProfile, status: AgentStatus | None = None) -> dict:
-    d = {
-        "id": str(ap.id),
-        "tenant_id": str(ap.tenant_id),
-        "user_id": str(ap.user_id),
-        "skills": ap.skills,
-        "max_concurrent": ap.max_concurrent,
-        "team": ap.team,
-        "created_at": ap.created_at.isoformat() if ap.created_at else None,
-    }
+def _agent_profile_response(ap: AgentProfile, status: AgentStatus | None = None) -> dict:
+    d = AgentProfileResponse.model_validate(ap).model_dump()
     if status:
-        d["status"] = {
-            "id": str(status.id),
-            "status": status.status,
-            "current_conversations": status.current_conversations,
-        }
+        from app.schemas import AgentStatusResponse
+        d["status"] = AgentStatusResponse.model_validate(status).model_dump()
     return d
 
 
@@ -113,7 +94,7 @@ async def create_tenant(
     db.add(tenant)
     await db.commit()
     await db.refresh(tenant)
-    return _tenant_dict(tenant)
+    return _tenant_response(tenant)
 
 
 @router.get("/{tenant_id}")
@@ -126,7 +107,7 @@ async def get_tenant(
     tenant = result.scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    return _tenant_dict(tenant)
+    return _tenant_response(tenant)
 
 
 @router.patch("/{tenant_id}")
@@ -150,7 +131,7 @@ async def update_tenant(
 
     await db.commit()
     await db.refresh(tenant)
-    return _tenant_dict(tenant)
+    return _tenant_response(tenant)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +160,7 @@ async def create_user(
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    return _user_dict(user)
+    return _user_response(user)
 
 
 @router.post("/{tenant_id}/agents")
@@ -230,4 +211,4 @@ async def create_agent(
     await db.refresh(agent_profile)
     await db.refresh(agent_status)
 
-    return _agent_profile_dict(agent_profile, agent_status)
+    return _agent_profile_response(agent_profile, agent_status)

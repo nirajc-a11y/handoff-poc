@@ -19,6 +19,7 @@ from app.db.models.conversation import Conversation
 from app.dependencies import get_current_user_id, get_db, get_tenant_id
 from app.providers.base import WhatsAppMessage
 from app.providers.registry import provider_registry
+from app.schemas import PhoneNumber
 from app.services.message_service import message_service
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/channels/whatsapp", tags=["whatsapp"])
 # ---------------------------------------------------------------------------
 
 class InboundWebhookRequest(BaseModel):
-    from_number: str
+    from_number: PhoneNumber
     content: str
     content_type: str = "text"
     tenant_id: UUID

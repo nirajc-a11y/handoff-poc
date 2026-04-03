@@ -139,7 +139,7 @@ def get_worker_options() -> WorkerOptions:
     return WorkerOptions(
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,
-        num_idle_processes=1,
+        num_idle_processes=2,
         api_key=settings.livekit_api_key,
         api_secret=settings.livekit_api_secret,
         ws_url=settings.livekit_url,

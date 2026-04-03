@@ -422,19 +422,38 @@ class VoiceAISession:
             if on_audio:
                 try:
                     return await self._stream_llm_tts(transcript, db_session, on_audio)
+                except asyncio.CancelledError:
+                    raise
+                except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as exc:
+                    logger.warning(
+                        "Streaming pipeline failed (provider error: %s, conv=%s, turn=%d), "
+                        "falling back to batch",
+                        exc, self.conv_id, self.turn_count,
+                    )
                 except Exception:
-                    logger.exception("Streaming pipeline failed, falling back to batch")
+                    logger.exception(
+                        "Streaming pipeline failed unexpectedly (conv=%s, turn=%d), "
+                        "falling back to batch",
+                        self.conv_id, self.turn_count,
+                    )
 
             # --- Batch fallback ---
             return await self._batch_llm_tts(transcript, db_session)
 
+        except asyncio.CancelledError:
+            raise
         except httpx.HTTPStatusError as exc:
-            logger.error("API error in turn %d (HTTP %d): %s",
-                         self.turn_count, exc.response.status_code, exc.response.text[:200])
+            logger.error("API error in turn %d (HTTP %d, conv=%s): %s",
+                         self.turn_count, exc.response.status_code,
+                         self.conv_id, exc.response.text[:200])
             self._state = SpeakingState.LISTENING
             return None
         except Exception:
-            logger.exception("Error in voice AI turn %d", self.turn_count)
+            logger.exception(
+                "Error in voice AI turn %d (conv=%s, transcript_len=%d, history=%d)",
+                self.turn_count, self.conv_id,
+                len(transcript), len(self.conversation_history),
+            )
             self._state = SpeakingState.LISTENING
             return None
 
@@ -572,19 +591,55 @@ class VoiceAISession:
             if self.language == "mr" else
             f"Welcome to {self.tenant_name}. I'm your AI assistant. How can I help you today?"
         )
-        try:
+        # Check greeting cache first
+        cached = sarvam.get_cached_greeting(greeting, self.language, self.speaker)
+        if cached:
             total = 0
-            async for chunk in sarvam.synthesize_stream(greeting, self.language, self.speaker):
+            for chunk in cached:
                 if self._barge_in_event.is_set():
-                    logger.info("Barge-in during greeting, stopping")
                     break
                 await on_audio(chunk)
                 total += len(chunk)
+            logger.info("Greeting from cache: %d bytes mulaw", total)
+            return
+
+        try:
+            async def _do_stream():
+                total = 0
+                chunks_collected: list[bytes] = []
+                async for chunk in sarvam.synthesize_stream(greeting, self.language, self.speaker):
+                    if self._barge_in_event.is_set():
+                        logger.info("Barge-in during greeting, stopping")
+                        break
+                    await on_audio(chunk)
+                    chunks_collected.append(chunk)
+                    total += len(chunk)
+                # Cache for next time
+                if chunks_collected:
+                    sarvam.cache_greeting(greeting, self.language, self.speaker, chunks_collected)
+                return total
+
+            total = await asyncio.wait_for(_do_stream(), timeout=5.0)
             logger.info("Greeting streamed: %d bytes mulaw", total)
+        except asyncio.TimeoutError:
+            logger.warning("Greeting TTS stream timed out after 5s, trying batch fallback")
+            try:
+                tts_audio = await asyncio.wait_for(
+                    sarvam.synthesize(greeting, self.language, self.speaker),
+                    timeout=3.0,
+                )
+                await on_audio(_wav_to_mulaw(tts_audio))
+            except Exception:
+                logger.exception("Greeting batch TTS fallback also failed")
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.warning("Streaming greeting failed, trying batch fallback")
             try:
-                tts_audio = await sarvam.synthesize(greeting, self.language, self.speaker)
+                tts_audio = await asyncio.wait_for(
+                    sarvam.synthesize(greeting, self.language, self.speaker),
+                    timeout=3.0,
+                )
                 await on_audio(_wav_to_mulaw(tts_audio))
             except Exception:
                 logger.exception("Greeting TTS completely failed")

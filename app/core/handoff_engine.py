@@ -686,6 +686,7 @@ class HandoffEngine:
             from_state=from_state,
             to_state=to_state,
             reason=reason,
+            context_snapshot=dict(conversation.context) if conversation.context else None,
             metadata_=metadata,
         )
         db.add(handoff_event)

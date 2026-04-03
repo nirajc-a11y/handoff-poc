@@ -7,9 +7,10 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 - **6 Handoff Scenarios** — IVR->AI, AI->Human, Human->Human transfer, IVR skip, WhatsApp escalation, Email threading
 - **Real Phone Calls** — Twilio and Plivo integration with pluggable provider architecture
 - **AI Agent** — Groq-powered (Llama 3) conversational AI with streaming LLM + streaming TTS (~1.5s turn latency)
+- **LiveKit Agent Mode** — Feature-flagged alternative voice pipeline using LiveKit Agents SDK with Deepgram STT, Silero VAD, and Sarvam LLM/TTS plugins
 - **Barge-In** — Caller can interrupt AI mid-sentence; system detects speech, stops TTS, processes new input
 - **Echo Suppression** — Playback wait + echo guard prevents phantom transcript pickup
-- **Supervisor Panel** — Live Listen (hear call audio), Whisper (guide AI without customer hearing), Barge (take over call)
+- **Supervisor Panel** — Live Listen, Whisper, Barge via WebSocket (legacy) or LiveKit rooms (when LiveKit mode enabled)
 - **Bilingual IVR** — English + Marathi language selection with language-aware AI responses
 - **Call Recording** — Automatic recording saved to `recordings/` folder
 - **Live Transcription** — Real-time speech-to-text via Sarvam (Indian languages) and Twilio
@@ -28,7 +29,7 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
                                     │ events
                     ┌───────────────┴──────────────────┐
                     │          Event Bus                │
-                    │   (in-process async pub/sub)      │
+                    │      (Redis Pub/Sub)              │
                     └───────────────┬──────────────────┘
                                     │
   ┌──────────┐   ┌──────────┐  ┌────┴──────────┐  ┌────────────────┐
@@ -51,7 +52,7 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 
 ### Prerequisites
 - Python 3.11+
-- Docker (for PostgreSQL)
+- Docker (for PostgreSQL, Redis, and optionally LiveKit)
 - Node.js 18+ and pnpm (for frontend)
 - ngrok (for real phone calls)
 
@@ -68,7 +69,7 @@ bash scripts/dev.sh
 ```
 
 This single command:
-1. Starts PostgreSQL via Docker Compose
+1. Starts PostgreSQL, Redis, and LiveKit via Docker Compose
 2. Starts ngrok (auto-detects static domain from `.env`)
 3. Updates `BASE_WEBHOOK_URL` in `.env` with the ngrok URL
 4. Updates Plivo application webhook URLs via API
@@ -87,8 +88,8 @@ This single command:
 ### Manual Setup (step by step)
 
 ```bash
-# 1. Start PostgreSQL
-docker compose up -d postgres
+# 1. Start PostgreSQL + Redis
+docker compose up -d postgres redis
 
 # 2. Install dependencies
 pip install -e .
@@ -153,6 +154,21 @@ PLIVO_NUMBER=+91xxxxxxxxxx
 
 # Webhook URL (ngrok URL for Twilio/Plivo callbacks)
 BASE_WEBHOOK_URL=https://your-ngrok-url.ngrok-free.dev
+
+# Redis (event bus)
+REDIS_URL=redis://localhost:6379/0
+
+# LiveKit (optional — enables LiveKit agent mode for voice AI)
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+USE_LIVEKIT_AGENT=false
+
+# Sarvam AI (Indian language STT/TTS)
+SARVAM_API_KEY=your-sarvam-api-key
+
+# Deepgram (streaming STT — used by LiveKit agent)
+DEEPGRAM_API_KEY=your-deepgram-api-key
 ```
 
 ## Handoff Scenarios
@@ -244,6 +260,9 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 | `/api/v1/supervisor/whisper/{id}` | POST | Inject guidance into AI (customer can't hear) |
 | `/api/v1/supervisor/barge/{id}` | POST | Mute AI, take over call via conference |
 | `/api/v1/supervisor/active-sessions` | GET | List active AI voice sessions |
+| `/api/v1/supervisor/livekit-token/{id}` | POST | Get LiveKit room token (listen/barge mode) |
+| `/api/v1/supervisor/livekit-whisper/{id}` | POST | Whisper via LiveKit data channel |
+| `/api/v1/supervisor/livekit-barge/{id}` | POST | Barge via LiveKit (mute AI, get publish token) |
 
 91+ total endpoints. See full list at `/docs`.
 
@@ -253,15 +272,17 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 |-------|-----------|
 | Framework | FastAPI + Uvicorn |
 | Database | PostgreSQL + async SQLAlchemy + Alembic |
+| Cache/Pub-Sub | Redis 7 (event bus, cross-process pub/sub) |
 | AI | Groq SDK (Llama 3.3 70B) with streaming + mock fallback |
-| STT/TTS | Sarvam AI (Indian languages: English, Marathi, Hindi) |
+| STT/TTS | Sarvam AI (Indian languages), Deepgram (streaming STT) |
+| Voice AI Agent | LiveKit Agents SDK (feature-flagged) with Silero VAD |
 | Telephony | Twilio Voice + Plivo (pluggable) |
 | Browser Calling | Plivo Browser SDK (WebRTC) |
-| Real-time | WebSocket (FastAPI native) |
+| Real-time | Redis Pub/Sub → WebSocket (FastAPI native) |
 | Frontend | React 19 + TailwindCSS v4 + shadcn/ui |
 | IVR | Twilio TwiML / Plivo XML |
 | Recording | Full-call recording via Plivo/Twilio → local `.mp3` files |
-| Supervision | Live Listen + Whisper + Barge via WebSocket + conference |
+| Supervision | Legacy: WebSocket + conference. LiveKit: room-based listen/whisper/barge |
 
 ## Project Structure
 
@@ -287,7 +308,8 @@ handoff-poc/
 │   ├── core/
 │   │   ├── state_machine.py    #   11 states, 24 triggers, transition table
 │   │   ├── handoff_engine.py   #   Central orchestrator (most important file)
-│   │   ├── events.py           #   Async event bus with glob matching
+│   │   ├── events.py           #   Redis-backed async event bus
+│   │   ├── redis.py            #   Async Redis connection pool (singleton)
 │   │   ├── ai_engine.py        #   Groq AI with streaming LLM + bilingual support
 │   │   ├── ivr_engine.py       #   IVR menu traversal
 │   │   ├── routing_engine.py   #   Agent routing (skill-based, least-loaded)
@@ -305,10 +327,14 @@ handoff-poc/
 │   │   └── mock/               #   Mock providers for all channels
 │   ├── voice_ai/
 │   │   ├── voice_agent.py      #   VoiceAISession (barge-in, streaming, echo guard)
+│   │   ├── livekit_agent.py    #   LiveKit Agent worker (Deepgram STT, Silero VAD, Sarvam LLM/TTS)
+│   │   ├── plivo_livekit_bridge.py  # Plivo↔LiveKit audio bridge
+│   │   ├── sarvam_llm_plugin.py     # LiveKit LLM plugin wrapping AIEngine
+│   │   ├── sarvam_tts_plugin.py     # LiveKit TTS plugin wrapping Sarvam
 │   │   ├── sarvam.py           #   Sarvam STT/TTS client (shared httpx pool)
 │   │   └── session_registry.py #   Active session tracking for supervisor
 │   ├── services/               #   Business logic layer (7 services)
-│   └── ws/                     #   WebSocket manager + event broadcaster
+│   └── ws/                     #   WebSocket manager + Redis→WS broadcaster
 ├── scripts/
 │   ├── dev.sh                  #   Single command: start full stack (pg + ngrok + backend + frontend)
 │   ├── seed.py                 #   Seed demo data (bilingual IVR, agents, leads)
@@ -320,7 +346,7 @@ handoff-poc/
 ├── static/
 │   └── index.html              #   Live operations dashboard + softphone
 ├── recordings/                 #   Call recordings (.wav files)
-├── docker-compose.yaml         #   PostgreSQL + app
+├── docker-compose.yaml         #   PostgreSQL + Redis + LiveKit + app
 ├── pyproject.toml              #   Python dependencies
 └── alembic/                    #   Database migrations
 ```

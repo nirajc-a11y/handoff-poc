@@ -10,6 +10,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, get_tenant_id
+from app.schemas import (
+    CampaignLeadResponse,
+    CampaignResponse,
+    CampaignStatusEnum,
+    CampaignTypeEnum,
+    NameStr,
+)
 from app.services.campaign_service import campaign_service
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
@@ -20,8 +27,8 @@ router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 # ---------------------------------------------------------------------------
 
 class CampaignCreate(BaseModel):
-    name: str
-    type: str
+    name: NameStr
+    type: CampaignTypeEnum
     config: dict | None = None
     start_date: date | None = None
     end_date: date | None = None
@@ -29,7 +36,7 @@ class CampaignCreate(BaseModel):
 
 class CampaignUpdate(BaseModel):
     name: str | None = None
-    status: str | None = None
+    status: CampaignStatusEnum | None = None
     config: dict | None = None
 
 
@@ -50,35 +57,12 @@ class NextLead(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _campaign_dict(c) -> dict:
-    return {
-        "id": str(c.id),
-        "tenant_id": str(c.tenant_id),
-        "name": c.name,
-        "type": c.type,
-        "status": c.status,
-        "start_date": str(c.start_date) if c.start_date else None,
-        "end_date": str(c.end_date) if c.end_date else None,
-        "config": c.config,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
-        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
-    }
+def _campaign_response(c) -> dict:
+    return CampaignResponse.model_validate(c).model_dump()
 
 
-def _campaign_lead_dict(cl) -> dict:
-    return {
-        "id": str(cl.id),
-        "campaign_id": str(cl.campaign_id),
-        "lead_id": str(cl.lead_id),
-        "assigned_agent_id": str(cl.assigned_agent_id) if cl.assigned_agent_id else None,
-        "status": cl.status,
-        "attempt_count": cl.attempt_count,
-        "last_attempt_at": cl.last_attempt_at.isoformat() if cl.last_attempt_at else None,
-        "next_retry_at": cl.next_retry_at.isoformat() if cl.next_retry_at else None,
-        "disposition": cl.disposition,
-        "notes": cl.notes,
-        "created_at": cl.created_at.isoformat() if cl.created_at else None,
-    }
+def _campaign_lead_response(cl) -> dict:
+    return CampaignLeadResponse.model_validate(cl).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +82,7 @@ async def create_campaign(
         type=body.type,
         config=body.config,
     )
-    return _campaign_dict(campaign)
+    return _campaign_response(campaign)
 
 
 @router.get("")
@@ -108,7 +92,7 @@ async def list_campaigns(
     tenant_id: UUID = Depends(get_tenant_id),
 ):
     campaigns = await campaign_service.list_campaigns(db, tenant_id=tenant_id, status=status)
-    return [_campaign_dict(c) for c in campaigns]
+    return [_campaign_response(c) for c in campaigns]
 
 
 @router.get("/{campaign_id}")
@@ -120,7 +104,7 @@ async def get_campaign(
     campaign = await campaign_service.get_campaign(db, tenant_id=tenant_id, campaign_id=campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    return _campaign_dict(campaign)
+    return _campaign_response(campaign)
 
 
 @router.patch("/{campaign_id}")
@@ -139,7 +123,7 @@ async def update_campaign(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return _campaign_dict(campaign)
+    return _campaign_response(campaign)
 
 
 @router.delete("/{campaign_id}")
@@ -170,7 +154,7 @@ async def add_leads(
     campaign_leads = await campaign_service.add_leads(
         db, tenant_id=tenant_id, campaign_id=campaign_id, lead_ids=body.lead_ids
     )
-    return {"added": len(campaign_leads), "campaign_leads": [_campaign_lead_dict(cl) for cl in campaign_leads]}
+    return {"added": len(campaign_leads), "campaign_leads": [_campaign_lead_response(cl) for cl in campaign_leads]}
 
 
 @router.get("/{campaign_id}/leads")
@@ -183,7 +167,7 @@ async def list_campaign_leads(
     leads = await campaign_service.list_campaign_leads(
         db, tenant_id=tenant_id, campaign_id=campaign_id, status=status
     )
-    return [_campaign_lead_dict(cl) for cl in leads]
+    return [_campaign_lead_response(cl) for cl in leads]
 
 
 @router.post("/{campaign_id}/assign")
@@ -218,4 +202,4 @@ async def next_lead(
     )
     if cl is None:
         raise HTTPException(status_code=404, detail="No pending leads for this agent")
-    return _campaign_lead_dict(cl)
+    return _campaign_lead_response(cl)

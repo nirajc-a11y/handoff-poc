@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.lead import Lead
 from app.dependencies import get_db, get_tenant_id
+from app.schemas import LeadResponse, PhoneNumber
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -22,24 +23,24 @@ router = APIRouter(prefix="/leads", tags=["leads"])
 
 class LeadCreate(BaseModel):
     name: str | None = None
-    phone: str | None = None
-    email: str | None = None
+    phone: PhoneNumber | None = None
+    email: EmailStr | None = None
     whatsapp_number: str | None = None
     metadata: dict | None = None
 
 
 class LeadUpdate(BaseModel):
     name: str | None = None
-    phone: str | None = None
-    email: str | None = None
+    phone: PhoneNumber | None = None
+    email: EmailStr | None = None
     whatsapp_number: str | None = None
     metadata: dict | None = None
 
 
 class LeadImportItem(BaseModel):
     name: str | None = None
-    phone: str | None = None
-    email: str | None = None
+    phone: PhoneNumber | None = None
+    email: EmailStr | None = None
     whatsapp_number: str | None = None
     metadata: dict | None = None
 
@@ -52,18 +53,8 @@ class LeadImport(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _lead_dict(lead: Lead) -> dict:
-    return {
-        "id": str(lead.id),
-        "tenant_id": str(lead.tenant_id),
-        "name": lead.name,
-        "phone": lead.phone,
-        "email": lead.email,
-        "whatsapp_number": lead.whatsapp_number,
-        "metadata": lead.metadata_,
-        "created_at": lead.created_at.isoformat() if lead.created_at else None,
-        "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
-    }
+def _lead_response(lead: Lead) -> dict:
+    return LeadResponse.model_validate(lead).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +78,7 @@ async def create_lead(
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
-    return _lead_dict(lead)
+    return _lead_response(lead)
 
 
 @router.get("")
@@ -116,7 +107,7 @@ async def list_leads(
     stmt = stmt.order_by(Lead.created_at.desc()).offset(offset).limit(limit)
     result = await db.execute(stmt)
     leads = result.scalars().all()
-    return [_lead_dict(l) for l in leads]
+    return [_lead_response(l) for l in leads]
 
 
 @router.get("/{lead_id}")
@@ -134,7 +125,7 @@ async def get_lead(
     lead = result.scalar_one_or_none()
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead not found")
-    return _lead_dict(lead)
+    return _lead_response(lead)
 
 
 @router.patch("/{lead_id}")
@@ -166,7 +157,7 @@ async def update_lead(
 
     await db.commit()
     await db.refresh(lead)
-    return _lead_dict(lead)
+    return _lead_response(lead)
 
 
 @router.delete("/{lead_id}")
@@ -216,4 +207,4 @@ async def import_leads(
     for lead in created:
         await db.refresh(lead)
 
-    return {"imported": len(created), "leads": [_lead_dict(l) for l in created]}
+    return {"imported": len(created), "leads": [_lead_response(l) for l in created]}

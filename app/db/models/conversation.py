@@ -14,6 +14,9 @@ class Conversation(Base, PrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_conv_tenant_state", "tenant_id", "state"),
         Index("ix_conv_tenant_handler", "tenant_id", "current_handler_id"),
         Index("ix_conv_tenant_queue", "tenant_id", "state", "queue_priority"),
+        Index("ix_conv_tenant_customer", "tenant_id", "customer_identifier"),
+        Index("ix_conv_tenant_queue_time", "tenant_id", "queue_entered_at",
+              postgresql_where=text("queue_entered_at IS NOT NULL")),
     )
 
     channel: Mapped[str] = mapped_column(String(20), nullable=False)  # voice, whatsapp, email, sms

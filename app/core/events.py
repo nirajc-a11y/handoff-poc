@@ -54,14 +54,21 @@ class Event:
 class EventBus:
     """Publishes events to Redis Pub/Sub channels."""
 
-    async def publish(self, event: Event) -> None:
+    async def publish(self, event: Event) -> bool:
+        """Publish an event to Redis. Returns True on success, False on failure."""
         try:
             r = get_redis()
             await r.publish(event.topic, event.to_json())
+            return True
         except Exception:
+            conv_id = event.payload.get("conversation_id", "unknown")
             logger.exception(
-                "Failed to publish event %s (topic=%s)", event.event_id, event.topic
+                "Failed to publish event %s (topic=%s, conversation=%s)",
+                event.event_id,
+                event.topic,
+                conv_id,
             )
+            return False
 
 
 # Module-level singleton

@@ -41,7 +41,35 @@ class Settings(BaseSettings):
     vad_threshold: float = 0.5
     vad_endpointing_profile: str = "ai_conversation"
 
+    # Bridge audio
+    bridge_silence_threshold: int = 50
+    # Filler audio played while AI pipeline connects (eliminates dead air)
+    plivo_filler_audio_url: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def validate_voice_pipeline(self) -> list[str]:
+        """Check voice pipeline config. Returns warnings. Raises on fatal."""
+        warnings: list[str] = []
+
+        if self.use_livekit_agent:
+            if not self.livekit_url:
+                raise ValueError("use_livekit_agent=True but LIVEKIT_URL is empty")
+            if not self.livekit_api_key or not self.livekit_api_secret:
+                raise ValueError("use_livekit_agent=True but LIVEKIT_API_KEY/SECRET missing")
+            if not self.deepgram_api_key:
+                raise ValueError("LiveKit agent requires DEEPGRAM_API_KEY for STT/TTS")
+
+        if not self.sarvam_api_key and not self.groq_api_key:
+            warnings.append("No LLM provider configured (SARVAM_API_KEY, GROQ_API_KEY)")
+
+        if not self.sarvam_api_key:
+            warnings.append("SARVAM_API_KEY missing — TTS will not work")
+
+        if not self.plivo_auth_id and not self.twilio_account_sid:
+            warnings.append("No telephony provider configured (Plivo or Twilio)")
+
+        return warnings
 
 
 settings = Settings()

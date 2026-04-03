@@ -271,10 +271,10 @@ async def plivo_audio_stream(
                 try:
                     mulaw_response = await asyncio.wait_for(
                         session.process_turn(db_session=db, on_audio=send_chunk_with_bargein),
-                        timeout=15.0,
+                        timeout=20.0,
                     )
                 except asyncio.TimeoutError:
-                    logger.error("process_turn timed out after 15s: conv=%s", conv_id)
+                    logger.error("process_turn timed out after 20s: conv=%s", conv_id)
                     session.reset_listening()
                     return
                 except Exception:
@@ -328,17 +328,13 @@ async def plivo_audio_stream(
     # ------------------------------------------------------------------
 
     async def _turn_watcher():
-        """Wait for Deepgram utterance_end events and trigger turn processing."""
+        """Wait for Deepgram utterance_end events and process turns sequentially."""
         while ws_open:
             has_turn = await session.wait_for_turn(timeout=2.0)
-            if not has_turn:
+            if not has_turn or not ws_open:
                 continue
-            # Wait for processing lock to be free (don't tight-loop)
-            while processing_lock.locked() and ws_open:
-                await asyncio.sleep(0.1)
-            if ws_open and session._final_transcripts:
-                session._pending_turn.clear()
-                asyncio.create_task(process_and_respond())
+            # Process inline (not fire-and-forget) to ensure ordering
+            await process_and_respond()
 
     turn_watcher_task: asyncio.Task | None = None
 
@@ -379,7 +375,12 @@ async def plivo_audio_stream(
                         if session.barge_in_requested:
                             await send_clear_audio()
                         session.finish_speaking()
-                asyncio.create_task(_stream_greeting())
+                greeting_task = asyncio.create_task(_stream_greeting())
+                greeting_task.add_done_callback(
+                    lambda t: t.exception() and logger.error(
+                        "Greeting task failed: %s", t.exception()
+                    ) if not t.cancelled() else None
+                )
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")

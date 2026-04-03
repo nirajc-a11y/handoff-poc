@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.events import Event, event_bus
 from app.dependencies import get_db, get_tenant_id
+from app.schemas import AgentResponse, AgentStatusEnum, AgentStatusResponse
 from app.services.agent_service import agent_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 class UpdateStatusRequest(BaseModel):
-    status: str
+    status: AgentStatusEnum
 
 
 # ---------------------------------------------------------------------------
@@ -29,93 +30,51 @@ class UpdateStatusRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _agent_to_dict(agent) -> dict:
-    result: dict = {
-        "id": str(agent.id),
-        "tenant_id": str(agent.tenant_id),
-        "user_id": str(agent.user_id),
-        "skills": agent.skills,
-        "max_concurrent": agent.max_concurrent,
-        "team": agent.team,
-        "created_at": agent.created_at.isoformat() if agent.created_at else None,
-    }
-    if agent.status is not None:
-        result["status"] = {
-            "status": agent.status.status,
-            "current_conversations": agent.status.current_conversations,
-            "last_status_change": (
-                agent.status.last_status_change.isoformat()
-                if agent.status.last_status_change
-                else None
-            ),
-        }
-    else:
-        result["status"] = None
-    return result
-
-
-def _agent_status_to_dict(agent_status) -> dict:
-    return {
-        "agent_id": str(agent_status.agent_id),
-        "tenant_id": str(agent_status.tenant_id),
-        "status": agent_status.status,
-        "current_conversations": agent_status.current_conversations,
-        "last_status_change": (
-            agent_status.last_status_change.isoformat()
-            if agent_status.last_status_change
-            else None
-        ),
-        "updated_at": (
-            agent_status.updated_at.isoformat() if agent_status.updated_at else None
-        ),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 
-@router.get("")
+@router.get("", response_model=list[AgentResponse])
 async def list_agents(
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-) -> list[dict]:
+):
     """List all agent profiles with their current status."""
     agents = await agent_service.list_agents(db=db, tenant_id=tenant_id)
-    return [_agent_to_dict(a) for a in agents]
+    return [AgentResponse.model_validate(a) for a in agents]
 
 
-@router.get("/available")
+@router.get("/available", response_model=list[AgentResponse])
 async def list_available_agents(
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-) -> list[dict]:
+):
     """List agents whose current status is 'available'."""
     agents = await agent_service.get_available_agents(db=db, tenant_id=tenant_id)
-    return [_agent_to_dict(a) for a in agents]
+    return [AgentResponse.model_validate(a) for a in agents]
 
 
-@router.get("/{agent_id}")
+@router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-) -> dict:
+):
     """Get a single agent profile with status."""
     agent = await agent_service.get_agent(db=db, tenant_id=tenant_id, agent_id=agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return _agent_to_dict(agent)
+    return AgentResponse.model_validate(agent)
 
 
-@router.patch("/{agent_id}/status")
+@router.patch("/{agent_id}/status", response_model=AgentStatusResponse)
 async def update_agent_status(
     agent_id: UUID,
     body: UpdateStatusRequest,
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-) -> dict:
+):
     """Update an agent's availability status."""
     try:
         agent_status = await agent_service.update_status(
@@ -127,12 +86,12 @@ async def update_agent_status(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    result = _agent_status_to_dict(agent_status)
+    result = AgentStatusResponse.model_validate(agent_status)
 
     await event_bus.publish(Event(
         topic="agent.status_changed",
         tenant_id=tenant_id,
-        payload=result,
+        payload=result.model_dump(),
     ))
 
     return result

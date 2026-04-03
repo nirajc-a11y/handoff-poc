@@ -25,6 +25,8 @@ _PATTERNS = [
     "channel.*",
 ]
 
+_MAX_BACKOFF = 30.0  # seconds
+
 
 class WSBroadcaster:
     def __init__(self, ws_manager: WSConnectionManager) -> None:
@@ -36,34 +38,55 @@ class WSBroadcaster:
         self._task = asyncio.create_task(self._subscribe_loop())
 
     async def _subscribe_loop(self) -> None:
-        """Subscribe to Redis and relay events to WebSocket clients."""
-        r = get_redis()
-        pubsub = r.pubsub()
-        await pubsub.psubscribe(*_PATTERNS)
-        logger.info("WSBroadcaster subscribed to Redis patterns: %s", _PATTERNS)
+        """Subscribe to Redis and relay events to WebSocket clients.
 
-        try:
-            async for message in pubsub.listen():
-                if message["type"] != "pmessage":
-                    continue
-                try:
-                    event = Event.from_json(message["data"])
-                    await self.ws_manager.broadcast_to_tenant(
-                        event.tenant_id,
-                        {
-                            "type": event.topic,
-                            "event_id": str(event.event_id),
-                            "timestamp": event.timestamp.isoformat(),
-                            "data": event.payload,
-                        },
-                    )
-                except Exception:
-                    logger.exception("Failed to relay Redis message to WebSocket")
-        except asyncio.CancelledError:
-            logger.info("WSBroadcaster subscribe loop cancelled")
-        finally:
-            await pubsub.punsubscribe(*_PATTERNS)
-            await pubsub.aclose()
+        Automatically reconnects with exponential backoff on Redis failures.
+        """
+        backoff = 1.0
+
+        while True:
+            pubsub = None
+            try:
+                r = get_redis()
+                pubsub = r.pubsub()
+                await pubsub.psubscribe(*_PATTERNS)
+                logger.info("WSBroadcaster subscribed to Redis patterns: %s", _PATTERNS)
+                backoff = 1.0  # reset on successful connection
+
+                async for message in pubsub.listen():
+                    if message["type"] != "pmessage":
+                        continue
+                    try:
+                        event = Event.from_json(message["data"])
+                        await self.ws_manager.broadcast_to_tenant(
+                            event.tenant_id,
+                            {
+                                "type": event.topic,
+                                "event_id": str(event.event_id),
+                                "timestamp": event.timestamp.isoformat(),
+                                "data": event.payload,
+                            },
+                        )
+                    except Exception:
+                        logger.exception("Failed to relay Redis message to WebSocket")
+
+            except asyncio.CancelledError:
+                logger.info("WSBroadcaster subscribe loop cancelled")
+                break
+            except Exception:
+                logger.exception(
+                    "WSBroadcaster Redis connection lost, reconnecting in %.1fs",
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _MAX_BACKOFF)
+            finally:
+                if pubsub is not None:
+                    try:
+                        await pubsub.punsubscribe(*_PATTERNS)
+                        await pubsub.aclose()
+                    except Exception:
+                        pass  # best-effort cleanup
 
     async def stop(self) -> None:
         if self._task and not self._task.done():

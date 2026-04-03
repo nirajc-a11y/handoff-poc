@@ -11,6 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.handoff_engine import ConversationNotFoundError, handoff_engine
 from app.core.state_machine import StateMachineError, Trigger
 from app.dependencies import get_current_user_id, get_db, get_tenant_id
+from app.schemas import (
+    ContentTypeEnum,
+    ConversationDetailResponse,
+    ConversationResponse,
+    HandoffEventResponse,
+    MessageResponse,
+    SenderTypeEnum,
+)
 from app.services.conversation_service import conversation_service
 from app.services.message_service import message_service
 
@@ -24,8 +32,8 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 class CreateMessageRequest(BaseModel):
     content: str
-    content_type: str = "text"
-    sender_type: str = "agent"
+    content_type: ContentTypeEnum = ContentTypeEnum.text
+    sender_type: SenderTypeEnum = SenderTypeEnum.agent
 
 
 class DispositionRequest(BaseModel):
@@ -38,43 +46,13 @@ class DispositionRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _conversation_to_dict(conv) -> dict:
-    return {
-        "id": str(conv.id),
-        "tenant_id": str(conv.tenant_id),
-        "channel": conv.channel,
-        "direction": conv.direction,
-        "state": conv.state,
-        "sub_state": conv.sub_state,
-        "customer_identifier": conv.customer_identifier,
-        "customer_name": conv.customer_name,
-        "current_handler_type": conv.current_handler_type,
-        "current_handler_id": str(conv.current_handler_id) if conv.current_handler_id else None,
-        "lead_id": str(conv.lead_id) if conv.lead_id else None,
-        "campaign_lead_id": str(conv.campaign_lead_id) if conv.campaign_lead_id else None,
-        "queue_entered_at": conv.queue_entered_at.isoformat() if getattr(conv, "queue_entered_at", None) else None,
-        "queue_priority": conv.queue_priority,
-        "required_skills": getattr(conv, "required_skills", None),
-        "started_at": conv.started_at.isoformat() if conv.started_at else None,
-        "answered_at": conv.answered_at.isoformat() if conv.answered_at else None,
-        "ended_at": conv.ended_at.isoformat() if conv.ended_at else None,
-        "duration_seconds": conv.duration_seconds,
-        "disposition": conv.disposition,
-        "disposition_notes": conv.disposition_notes,
-        "ai_confidence_score": conv.ai_confidence_score,
-        "ai_escalation_reason": conv.ai_escalation_reason,
-        "recording_url": conv.recording_url,
-        "context": conv.context,
-        "created_at": conv.created_at.isoformat() if conv.created_at else None,
-        "updated_at": conv.updated_at.isoformat() if getattr(conv, "updated_at", None) else None,
-    }
+def _conversation_response(conv) -> dict:
+    return ConversationResponse.model_validate(conv).model_dump()
 
 
-def _conversation_detail_to_dict(conv) -> dict:
+def _conversation_detail_response(conv) -> dict:
     """Full detail including related messages, handoff events, and channel sessions."""
-    base = _conversation_to_dict(conv)
-    base["messages"] = [_message_to_dict(m) for m in (conv.messages or [])]
-    base["handoff_events"] = [_handoff_event_to_dict(e) for e in (conv.handoff_events or [])]
+    base = ConversationDetailResponse.model_validate(conv).model_dump()
     base["channel_sessions"] = [
         {
             "id": str(s.id),
@@ -91,38 +69,12 @@ def _conversation_detail_to_dict(conv) -> dict:
     return base
 
 
-def _message_to_dict(msg) -> dict:
-    return {
-        "id": str(msg.id),
-        "conversation_id": str(msg.conversation_id),
-        "tenant_id": str(msg.tenant_id),
-        "sender_type": msg.sender_type,
-        "sender_id": str(msg.sender_id) if msg.sender_id else None,
-        "content_type": msg.content_type,
-        "content": msg.content,
-        "metadata": msg.metadata_,
-        "email_message_id": getattr(msg, "email_message_id", None),
-        "email_subject": getattr(msg, "email_subject", None),
-        "created_at": msg.created_at.isoformat() if msg.created_at else None,
-    }
+def _message_response(msg) -> dict:
+    return MessageResponse.model_validate(msg).model_dump()
 
 
-def _handoff_event_to_dict(evt) -> dict:
-    return {
-        "id": str(evt.id),
-        "conversation_id": str(evt.conversation_id),
-        "event_type": evt.event_type,
-        "from_handler_type": evt.from_handler_type,
-        "from_handler_id": str(evt.from_handler_id) if evt.from_handler_id else None,
-        "to_handler_type": evt.to_handler_type,
-        "to_handler_id": str(evt.to_handler_id) if evt.to_handler_id else None,
-        "from_state": evt.from_state,
-        "to_state": evt.to_state,
-        "reason": evt.reason,
-        "context_snapshot": evt.context_snapshot,
-        "metadata": evt.metadata_,
-        "created_at": evt.created_at.isoformat() if evt.created_at else None,
-    }
+def _handoff_event_response(evt) -> dict:
+    return HandoffEventResponse.model_validate(evt).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +102,7 @@ async def list_conversations(
         limit=limit,
         offset=offset,
     )
-    return [_conversation_to_dict(c) for c in conversations]
+    return [_conversation_response(c) for c in conversations]
 
 
 @router.get("/active")
@@ -163,7 +115,7 @@ async def list_active_conversations(
         db=db,
         tenant_id=tenant_id,
     )
-    return [_conversation_to_dict(c) for c in conversations]
+    return [_conversation_response(c) for c in conversations]
 
 
 @router.get("/{conversation_id}")
@@ -181,7 +133,7 @@ async def get_conversation(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    return _conversation_detail_to_dict(conversation)
+    return _conversation_detail_response(conversation)
 
 
 @router.get("/{conversation_id}/messages")
@@ -200,7 +152,7 @@ async def list_messages(
         limit=limit,
         offset=offset,
     )
-    return [_message_to_dict(m) for m in messages]
+    return [_message_response(m) for m in messages]
 
 
 @router.post("/{conversation_id}/messages")
@@ -221,7 +173,7 @@ async def create_message(
         content_type=body.content_type,
         sender_id=user_id,
     )
-    return _message_to_dict(message)
+    return _message_response(message)
 
 
 @router.post("/{conversation_id}/audio-message")
@@ -262,7 +214,7 @@ async def upload_audio_message(
         content_type="audio",
         sender_id=user_id,
     )
-    return _message_to_dict(message)
+    return _message_response(message)
 
 
 @router.get("/{conversation_id}/handoffs")
@@ -280,7 +232,7 @@ async def list_handoff_events(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    return [_handoff_event_to_dict(e) for e in (conversation.handoff_events or [])]
+    return [_handoff_event_response(e) for e in (conversation.handoff_events or [])]
 
 
 @router.post("/{conversation_id}/disposition")
@@ -317,4 +269,4 @@ async def submit_disposition(
     except StateMachineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _conversation_to_dict(conversation)
+    return _conversation_response(conversation)

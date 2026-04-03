@@ -98,6 +98,7 @@ class DeepgramStreamingSTT:
                 additional_headers=extra_headers,
                 ping_interval=20,
                 ping_timeout=10,
+                open_timeout=5.0,
             )
             self._connected = True
             self._receive_task = asyncio.create_task(self._receive_loop())
@@ -167,11 +168,18 @@ class DeepgramStreamingSTT:
         except websockets.exceptions.ConnectionClosed as e:
             logger.info("Deepgram WS closed: %s", e)
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception:
             logger.exception("Deepgram receive loop error")
         finally:
             self._connected = False
+            # Attempt one reconnect if not intentionally closed
+            if self._ws is not None:
+                logger.warning("Deepgram connection lost, attempting reconnect...")
+                try:
+                    await self.connect()
+                except Exception:
+                    logger.error("Deepgram reconnect failed, STT disabled for this session")
 
     async def _handle_results(self, msg: dict):
         """Process a Deepgram Results message."""
