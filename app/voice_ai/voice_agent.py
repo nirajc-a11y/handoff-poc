@@ -1,12 +1,15 @@
-"""Real-time voice AI agent: Sarvam STT -> Groq LLM -> Sarvam TTS.
+"""Real-time voice AI agent: Deepgram STT -> Groq LLM -> Sarvam TTS.
 
-Receives raw mulaw audio chunks from Plivo Stream, detects speech pauses,
-transcribes, generates LLM response, synthesizes, returns mulaw audio.
+Receives raw mulaw audio chunks from Plivo Stream, streams them to
+Deepgram for real-time transcription, generates LLM response, synthesizes
+TTS, and sends audio back.
 
 Production features:
-- Barge-in: detects user speech during TTS playback and cancels output
+- Deepgram streaming STT: continuous transcription, no audio cropping
+- MinWords barge-in: interim transcripts detect real user speech during TTS
+- Silero VAD: speech onset detection for Marathi batch STT fallback
 - Streaming TTS: sentences pipelined from LLM to TTS as they arrive
-- Tuned thresholds: 0.6s silence detection, 0.3s cooldown, 3s echo guard window
+- Echo guard: post-TTS phrase filtering for phone-line echo artifacts
 """
 
 import asyncio
@@ -14,25 +17,30 @@ import io
 import time
 
 try:
-    import audioop  # available in Python <=3.12
+    import audioop
 except ModuleNotFoundError:
-    import audioop_lts as audioop  # type: ignore[no-redef]  # Python 3.13+
+    import audioop_lts as audioop  # type: ignore[no-redef]
 import logging
 import uuid
 import wave
-from datetime import datetime, timezone
 
 import httpx
 
 from app.config import settings
 from app.core.ai_engine import ai_engine, AIResponse
 from app.voice_ai import sarvam
+from app.voice_ai.deepgram_stt import DeepgramStreamingSTT, count_real_words
+from app.voice_ai.vad import VADProcessor
 
 logger = logging.getLogger(__name__)
 
+# Minimum real words in interim transcript to confirm barge-in.
+# Echo typically transcribes as 0-2 backchannel words.
+MIN_BARGEIN_WORDS = 3
+
 
 def _mulaw_to_wav(mulaw_data: bytes, sample_rate: int = 8000) -> bytes:
-    """Convert mulaw audio bytes to WAV format for Sarvam STT."""
+    """Convert mulaw audio bytes to WAV format for batch STT fallback."""
     pcm_data = audioop.ulaw2lin(mulaw_data, 2)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -68,10 +76,15 @@ class SpeakingState:
 
 
 class VoiceAISession:
-    """One AI conversation session for a phone call."""
+    """One AI conversation session for a phone call.
+
+    Uses Deepgram streaming STT for real-time transcription (en, hi).
+    Falls back to batch STT (Sarvam saaras) for Marathi.
+    """
 
     def __init__(self, tenant_id: str, conv_id: str, language: str = "en", speaker: str = "ritu",
-                 tenant_name: str = "Demo Corp", system_prompt: str | None = None):
+                 tenant_name: str = "Demo Corp", system_prompt: str | None = None,
+                 endpointing_profile: str = settings.vad_endpointing_profile):
         self.tenant_id = tenant_id
         self.conv_id = conv_id
         self.language = language
@@ -80,35 +93,22 @@ class VoiceAISession:
         self.system_prompt = system_prompt
         self.conversation_history: list[dict] = []
         self.turn_count = 0
-        self.audio_buffer = bytearray()
-        self.silence_frames = 0
         self._greeting_sent = False
         self.should_escalate = False
         self.should_end_call = False
-        self._cooldown_remaining = 0
-        self._tts_finished_at: float = 0.0  # monotonic time when last TTS playback ended
+        self._tts_finished_at: float = 0.0
 
-        # Silence detection (mulaw 8kHz, thresholds are 16-bit PCM RMS values)
-        self.silence_threshold = 400   # RMS below this = silence (phone line noise is 200-300)
-        self.silence_duration_frames = 4800  # ~0.6 seconds (industry standard)
-        self.min_speech_frames = 3200  # ~0.4 seconds (reject very short noise bursts)
-
-        # Speech onset detection — require consecutive speech frames before buffering.
-        # Prevents sporadic noise spikes from triggering STT calls.
-        self._speech_started = False
-        self._speech_onset_count = 0
-        self._speech_onset_required = 5  # ~100ms of consecutive speech to confirm onset
+        # Deepgram streaming STT
+        self._deepgram: DeepgramStreamingSTT | None = None
+        self._use_streaming_stt = bool(settings.deepgram_api_key) and language in ("en", "hi")
+        self._final_transcripts: list[str] = []
+        self._pending_turn = asyncio.Event()  # Set when Deepgram signals utterance end
 
         # Barge-in state
         self._state = SpeakingState.LISTENING
         self._barge_in_event = asyncio.Event()
-        self._barge_in_energy_threshold = 600  # Higher than silence (400) to reject echo
-        self._barge_in_consecutive = 0
-        self._barge_in_required_frames = 3     # ~60ms of speech to confirm
 
-        # Echo guard: phone lines echo AI speech back as short mono-syllabic
-        # noise that STT transcribes as "Yes", "Yeah", etc. We discard the
-        # first utterance after TTS if it matches these patterns.
+        # Echo guard: discard short backchannel transcripts right after TTS
         self._post_tts_guard = False
         self._echo_phrases = {
             "yes", "yes.", "yeah", "yeah.", "ya", "ok", "okay", "hmm",
@@ -117,11 +117,76 @@ class VoiceAISession:
             "हो", "हो.", "हां", "हां.", "हम्म", "अच्छा",
         }
 
-        # Max audio buffer: 5 seconds at 8kHz mulaw (prevents runaway buffering on noisy lines)
+        # --- Batch STT fallback (Marathi, or if Deepgram unavailable) ---
+        self._vad = VADProcessor(
+            profile=endpointing_profile,
+            threshold=settings.vad_threshold,
+        )
+        self.audio_buffer = bytearray()
+        self._speech_started = False
+        self._speech_onset_count = 0
+        self._silence_vad_frames = 0
+        self._cooldown_remaining = 0
         self._max_buffer_bytes = 40000
 
     # ------------------------------------------------------------------
-    # Public properties for backward compat
+    # Deepgram lifecycle
+    # ------------------------------------------------------------------
+
+    async def start_deepgram(self):
+        """Open Deepgram streaming STT connection."""
+        if not self._use_streaming_stt:
+            return
+        self._deepgram = DeepgramStreamingSTT(
+            api_key=settings.deepgram_api_key,
+            language=self.language,
+            on_interim=self._on_deepgram_interim,
+            on_final=self._on_deepgram_final,
+            on_utterance_end=self._on_deepgram_utterance_end,
+        )
+        await self._deepgram.connect()
+
+    async def stop_deepgram(self):
+        """Close Deepgram connection."""
+        if self._deepgram:
+            await self._deepgram.close()
+            self._deepgram = None
+
+    def _on_deepgram_interim(self, transcript: str):
+        """Called on each interim transcript from Deepgram."""
+        # MinWords barge-in: during SPEAKING, check if user is really talking
+        if self._state == SpeakingState.SPEAKING:
+            real_words = count_real_words(transcript)
+            if real_words >= MIN_BARGEIN_WORDS:
+                logger.info("MinWords barge-in: '%s' (%d real words)", transcript[:60], real_words)
+                self._state = SpeakingState.BARGE_IN
+                self._barge_in_event.set()
+
+    def _on_deepgram_final(self, transcript: str):
+        """Called when Deepgram finalizes a transcript segment."""
+        if not transcript.strip():
+            return
+        # During SPEAKING without barge-in, Deepgram transcribes TTS echo
+        # from the phone line. Discard these -- they're the AI's own voice.
+        if self._state == SpeakingState.SPEAKING and not self._barge_in_event.is_set():
+            logger.info("Discarding echo transcript during TTS: '%s'", transcript.strip()[:60])
+            return
+        self._final_transcripts.append(transcript.strip())
+        logger.info("Deepgram final segment: %s", transcript.strip()[:80])
+
+    async def _on_deepgram_utterance_end(self):
+        """Called when Deepgram detects end of utterance (silence).
+
+        Always set pending_turn if we have transcripts, regardless of state.
+        The turn_watcher in plivo_stream.py will wait for processing_lock
+        which ensures we don't process during greeting playback.
+        """
+        if self._final_transcripts:
+            logger.info("Deepgram utterance end: %d segments pending", len(self._final_transcripts))
+            self._pending_turn.set()
+
+    # ------------------------------------------------------------------
+    # Public properties
     # ------------------------------------------------------------------
 
     @property
@@ -139,16 +204,23 @@ class VoiceAISession:
     def barge_in_requested(self) -> bool:
         return self._barge_in_event.is_set()
 
+    @property
+    def has_pending_turn(self) -> bool:
+        return self._pending_turn.is_set()
+
+    async def wait_for_turn(self, timeout: float = 60.0) -> bool:
+        """Wait for Deepgram to signal a turn is ready. Returns False on timeout."""
+        try:
+            await asyncio.wait_for(self._pending_turn.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     # ------------------------------------------------------------------
     # Supervisor interaction
     # ------------------------------------------------------------------
 
     def inject_supervisor_hint(self, message: str):
-        """Inject supervisor guidance into conversation history.
-
-        The AI will see this as a system-level instruction and incorporate
-        it in the next response. The customer never hears this directly.
-        """
         hint = {"role": "system", "content": f"[Supervisor guidance]: {message}"}
         self.conversation_history.append(hint)
         logger.info("Supervisor hint injected: '%s' (turn %d)", message[:80], self.turn_count)
@@ -161,34 +233,35 @@ class VoiceAISession:
         """Transition to SPEAKING state (TTS playback starting)."""
         self._state = SpeakingState.SPEAKING
         self._barge_in_event.clear()
-        self._barge_in_consecutive = 0
 
     def finish_speaking(self):
-        """Mark TTS playback as complete, discard echo, and start cooldown."""
-        self.audio_buffer.clear()
-        self.silence_frames = 0
-        self._cooldown_remaining = 2400  # ~0.3s at 8kHz (safety margin; playback wait handles most echo)
+        """Mark TTS playback as complete. Reset for next turn.
+
+        Does NOT clear _final_transcripts -- user may have spoken during
+        TTS playback (captured by Deepgram). Those transcripts should be
+        processed in the next turn.
+        """
         self._state = SpeakingState.LISTENING
         self._barge_in_event.clear()
-        self._barge_in_consecutive = 0
-        self._post_tts_guard = True  # Enable echo guard for next utterance
+        self._post_tts_guard = True
         self._tts_finished_at = time.monotonic()
+        # Reset batch fallback state
+        self.audio_buffer.clear()
+        self._silence_vad_frames = 0
+        self._cooldown_remaining = 2400
         self._speech_started = False
         self._speech_onset_count = 0
+        self._vad.reset()
 
     def reset_listening(self):
-        """Lightweight reset after a null turn (no TTS was played).
+        """Lightweight reset after barge-in or null turn.
 
-        Unlike finish_speaking(), this does NOT:
-        - Apply cooldown (no echo to wait for)
-        - Enable echo guard (no TTS output to echo)
-        - Clear audio_buffer (preserves any accumulated speech)
+        Does NOT clear _pending_turn -- that's only cleared in process_turn()
+        after transcripts are consumed. Clearing here would lose barge-in speech.
         """
-        self.silence_frames = 0
         self._state = SpeakingState.LISTENING
         self._barge_in_event.clear()
-        self._barge_in_consecutive = 0
-        # If buffer has content (e.g. from barge-in), speech is already confirmed
+        self._silence_vad_frames = 0
         self._speech_started = len(self.audio_buffer) > 0
         self._speech_onset_count = 0
 
@@ -196,345 +269,299 @@ class VoiceAISession:
     # Audio input
     # ------------------------------------------------------------------
 
-    def add_audio(self, mulaw_chunk: bytes) -> bool:
+    async def add_audio(self, mulaw_chunk: bytes) -> bool:
         """Add audio chunk. Returns True if speech pause detected.
 
-        During SPEAKING state: monitors for barge-in (user interruption).
-        During BARGE_IN state: buffers audio, detects speech pause.
-        During LISTENING state: normal speech pause detection.
-        """
-        pcm = audioop.ulaw2lin(mulaw_chunk, 2)
-        rms_energy = audioop.rms(pcm, 2)
+        When Deepgram streaming is active:
+        - Forwards all audio to Deepgram (continuous)
+        - Barge-in handled by Deepgram interim transcripts (MinWords)
+        - Turn detection handled by Deepgram utterance_end event
+        - Returns True when _pending_turn is set
 
-        # --- SPEAKING: detect barge-in ---
+        When batch STT fallback (Marathi, no Deepgram):
+        - Uses VAD-based silence detection (old path)
+        """
+        # Always forward to Deepgram if connected
+        if self._deepgram:
+            await self._deepgram.send_audio(mulaw_chunk)
+
+            # During SPEAKING, audio still streams to Deepgram for barge-in.
+            # MinWords check happens in _on_deepgram_interim callback.
+            if self._state == SpeakingState.SPEAKING:
+                return False
+
+            # During BARGE_IN, wait for Deepgram utterance_end
+            if self._state == SpeakingState.BARGE_IN:
+                return self._pending_turn.is_set()
+
+            # LISTENING: Deepgram handles endpointing via utterance_end callback
+            return self._pending_turn.is_set()
+
+        # --- Batch STT fallback (Marathi or no Deepgram key) ---
+        return self._add_audio_batch_fallback(mulaw_chunk)
+
+    def _add_audio_batch_fallback(self, mulaw_chunk: bytes) -> bool:
+        """VAD-based speech pause detection for batch STT fallback."""
+        vad_result = self._vad.process_chunk(mulaw_chunk)
+
         if self._state == SpeakingState.SPEAKING:
-            if rms_energy > self._barge_in_energy_threshold:
-                self._barge_in_consecutive += 1
-                if self._barge_in_consecutive >= self._barge_in_required_frames:
-                    logger.info("Barge-in detected (energy=%d, consecutive=%d)",
-                                rms_energy, self._barge_in_consecutive)
-                    self._state = SpeakingState.BARGE_IN
-                    self._barge_in_event.set()
-                    # Start buffering the interrupting speech
-                    self.audio_buffer.clear()
-                    self.audio_buffer.extend(mulaw_chunk)
-                    self.silence_frames = 0
-                    self._cooldown_remaining = 0
-            else:
-                self._barge_in_consecutive = 0
             return False
 
-        # --- BARGE_IN: buffer audio, detect pause ---
-        if self._state == SpeakingState.BARGE_IN:
-            self.audio_buffer.extend(mulaw_chunk)
-            if rms_energy < self.silence_threshold:
-                self.silence_frames += len(mulaw_chunk)
-            else:
-                self.silence_frames = 0
-            return (len(self.audio_buffer) > self.min_speech_frames
-                    and self.silence_frames >= self.silence_duration_frames)
-
-        # --- LISTENING: normal path ---
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= len(mulaw_chunk)
             return False
 
-        # Speech onset detection: require consecutive speech frames before
-        # buffering. This prevents sporadic noise spikes from triggering
-        # STT calls (e.g., phone-line crackle transcribed as "Telugu").
         if not self._speech_started:
-            if rms_energy >= self.silence_threshold:
+            if vad_result.is_speech:
                 self._speech_onset_count += 1
-                if self._speech_onset_count >= self._speech_onset_required:
+                if self._speech_onset_count >= self._vad.config.min_speech_chunks:
                     self._speech_started = True
                     self.audio_buffer.extend(mulaw_chunk)
             else:
                 self._speech_onset_count = 0
             return False
 
-        # Speech confirmed — buffer and detect pause
         self.audio_buffer.extend(mulaw_chunk)
-        if rms_energy < self.silence_threshold:
-            self.silence_frames += len(mulaw_chunk)
+        if not vad_result.is_speech:
+            self._silence_vad_frames += 1
         else:
-            self.silence_frames = 0
+            self._silence_vad_frames = 0
 
-        # Cap buffer to prevent runaway accumulation on noisy lines.
         if len(self.audio_buffer) >= self._max_buffer_bytes:
-            logger.info("Buffer cap reached (%d bytes), forcing speech pause", len(self.audio_buffer))
             return True
 
-        return (len(self.audio_buffer) > self.min_speech_frames
-                and self.silence_frames >= self.silence_duration_frames)
+        min_speech_bytes = int(self._vad.config.min_speech_ms / 1000 * 8000)
+        return (len(self.audio_buffer) > min_speech_bytes
+                and self._silence_vad_frames >= self._vad.config.min_silence_chunks)
 
     def flush_buffer(self):
-        """Discard any buffered audio (call after TTS playback to avoid echo)."""
         self.audio_buffer.clear()
-        self.silence_frames = 0
+        self._silence_vad_frames = 0
 
     # ------------------------------------------------------------------
-    # Turn processing: STT -> LLM (streaming) -> TTS (streaming)
+    # Turn processing
     # ------------------------------------------------------------------
 
     async def process_turn(self, db_session=None, on_audio=None) -> bytes | None:
-        """Process buffered audio: STT -> LLM -> TTS.
+        """Process a turn: get transcript -> LLM -> TTS.
 
-        Args:
-            db_session: Async SQLAlchemy session for saving messages.
-            on_audio: Optional async callback for streaming TTS. When provided,
-                mulaw chunks are sent via on_audio(chunk) as they arrive.
-                Returns b"" to signal audio was streamed.
-                When None, returns full mulaw audio (legacy path).
+        When Deepgram is active, transcript comes from _final_transcripts.
+        When batch fallback, transcript comes from audio_buffer -> STT.
 
-        IMPORTANT: is_speaking remains True after return -- the caller must
-        call finish_speaking() after audio playback completes.
+        Returns b"" if audio was streamed, bytes for batch TTS, None for no response.
         """
-        if len(self.audio_buffer) < self.min_speech_frames:
-            self.audio_buffer.clear()
-            self.silence_frames = 0
-            return None
-
-        # Check average energy — skip STT if buffer is mostly silence/noise
-        pcm_all = audioop.ulaw2lin(bytes(self.audio_buffer), 2)
-        avg_rms = audioop.rms(pcm_all, 2)
-        if avg_rms < self.silence_threshold:
-            logger.debug("Skipping STT: avg RMS %d below threshold %d", avg_rms, self.silence_threshold)
-            self.audio_buffer.clear()
-            self.silence_frames = 0
-            return None
-
-        # Check speech ratio — require that >=15% of frames have energy above
-        # threshold. Phone noise produces occasional spikes but not sustained energy.
-        chunk_size = 320  # 20ms frames
-        raw = bytes(self.audio_buffer)
-        speech_frames = 0
-        total_frames = 0
-        for i in range(0, len(raw), chunk_size):
-            frame = raw[i:i + chunk_size]
-            if len(frame) < 160:
-                break
-            total_frames += 1
-            frame_pcm = audioop.ulaw2lin(frame, 2)
-            if audioop.rms(frame_pcm, 2) >= self.silence_threshold:
-                speech_frames += 1
-        if total_frames > 0 and speech_frames / total_frames < 0.25:
-            logger.debug("Skipping STT: speech ratio %.1f%% below 25%% (%d/%d frames)",
-                         speech_frames / total_frames * 100, speech_frames, total_frames)
-            self.audio_buffer.clear()
-            self.silence_frames = 0
-            return None
-
-        self.start_speaking()
-        audio_data = bytes(self.audio_buffer)
-        self.audio_buffer.clear()
-        self.silence_frames = 0
-
-        # Trim trailing silence (from the 0.6s silence detection window).
-        # Sending silence to STT increases hallucination risk.
-        trim_chunk = 160  # 20ms frames
-        while len(audio_data) > trim_chunk:
-            tail_pcm = audioop.ulaw2lin(audio_data[-trim_chunk:], 2)
-            if audioop.rms(tail_pcm, 2) >= self.silence_threshold:
-                break
-            audio_data = audio_data[:-trim_chunk]
-        if len(audio_data) < self.min_speech_frames:
-            self._state = SpeakingState.LISTENING
-            return None
-
-        try:
-            wav_data = _mulaw_to_wav(audio_data)
-            transcript = await sarvam.transcribe(wav_data, language=self.language)
-
-            if not transcript.strip():
-                self._state = SpeakingState.LISTENING
+        # Get transcript
+        if self._use_streaming_stt and self._final_transcripts:
+            transcript = " ".join(self._final_transcripts)
+            self._final_transcripts.clear()
+            self._pending_turn.clear()
+        else:
+            # Batch STT fallback
+            transcript = await self._batch_transcribe()
+            if not transcript:
                 return None
 
-            # --- STT hallucination detection ---
-            # Whisper-family models hallucinate repetitive text on noise/silence.
-            words_raw = transcript.strip().lower().replace(",", " ").replace(".", " ").split()
+        if not transcript.strip():
+            self.reset_listening()
+            return None
 
-            # 1) Single-word hallucination: STT often returns a random word
-            #    ("But", "The", "So") from noise. Only allow plausible 1-word utterances.
-            _valid_single_words = {
-                "hello", "hi", "hey", "yes", "no", "yeah", "nah", "help",
-                "thanks", "bye", "okay", "ok", "please", "stop", "wait",
-                "नमस्ते", "हां", "नहीं", "हेलो", "धन्यवाद",
-            }
-            if len(words_raw) == 1 and words_raw[0].rstrip(".,!?") not in _valid_single_words:
-                logger.info("Hallucination guard: discarding single-word STT '%s'", transcript.strip())
-                self._state = SpeakingState.LISTENING
+        # --- Hallucination / echo guards (still useful for both paths) ---
+        words_raw = transcript.strip().lower().replace(",", " ").replace(".", " ").split()
+
+        # Single-word hallucination guard
+        _valid_single_words = {
+            "hello", "hi", "hey", "yes", "no", "yeah", "nah", "help",
+            "thanks", "bye", "okay", "ok", "please", "stop", "wait",
+            "नमस्ते", "हां", "नहीं", "हेलो", "धन्यवाद",
+        }
+        if len(words_raw) == 1 and words_raw[0].rstrip(".,!?") not in _valid_single_words:
+            logger.info("Hallucination guard: discarding single-word '%s'", transcript.strip())
+            self.reset_listening()
+            return None
+
+        # Repetitive hallucination guard
+        if len(words_raw) > 4:
+            from collections import Counter
+            word_counts = Counter(words_raw)
+            most_common_word, most_common_count = word_counts.most_common(1)[0]
+            if most_common_count / len(words_raw) > 0.6:
+                logger.info("Hallucination guard: discarding repetitive '%s'", most_common_word)
+                self.reset_listening()
                 return None
 
-            # 2) Repetitive hallucination: same word >60% of transcript
-            if len(words_raw) > 4:
-                from collections import Counter
-                word_counts = Counter(words_raw)
-                most_common_word, most_common_count = word_counts.most_common(1)[0]
-                if most_common_count / len(words_raw) > 0.6:
-                    logger.info("Hallucination guard: discarding repetitive STT ('%s' x%d in %d words)",
-                                most_common_word, most_common_count, len(words_raw))
-                    self._state = SpeakingState.LISTENING
+        # Echo guard
+        if self._post_tts_guard:
+            echo_age = time.monotonic() - self._tts_finished_at
+            if echo_age > 3.0:
+                self._post_tts_guard = False
+            else:
+                self._post_tts_guard = False
+                cleaned = transcript.strip().lower().rstrip(".!,")
+                words = cleaned.split()
+                if len(words) <= 4 and cleaned in self._echo_phrases:
+                    logger.info("Echo guard: discarding '%s' (%.1fs after TTS)", transcript.strip(), echo_age)
+                    self.reset_listening()
+                    return None
+                echo_words = {"yes", "yeah", "ya", "ok", "okay", "hmm", "hm", "uh", "um", "ah", "mm",
+                              "right", "sure", "हो", "हां", "हम्म", "अच्छा"}
+                if all(w.rstrip(".,!?") in echo_words for w in words):
+                    logger.info("Echo guard: discarding all-echo '%s'", transcript.strip()[:80])
+                    self.reset_listening()
                     return None
 
-            # Echo guard: discard short phantom transcripts from phone-line echo.
-            # Only active within 3s of TTS ending — real echo decays in <1s,
-            # the extra margin covers slow phone networks.
-            if self._post_tts_guard:
-                echo_age = time.monotonic() - self._tts_finished_at
-                if echo_age > 3.0:
-                    # Guard expired — treat all speech as genuine
-                    logger.debug("Echo guard expired (%.1fs since TTS), accepting transcript", echo_age)
-                    self._post_tts_guard = False
-                else:
-                    self._post_tts_guard = False  # One-shot: only first utterance after TTS
-                    cleaned = transcript.strip().lower().rstrip(".!,")
-                    words = cleaned.split()
-                    # Check short echo phrases
-                    if len(words) <= 4 and cleaned in self._echo_phrases:
-                        logger.info("Echo guard: discarding likely echo '%s' (%.1fs after TTS)",
-                                    transcript.strip(), echo_age)
-                        self._state = SpeakingState.LISTENING
-                        return None
-                    # Also discard if it's entirely echo-like words (any length)
-                    echo_words = {"yes", "yeah", "ya", "ok", "okay", "hmm", "hm", "uh", "um", "ah", "mm",
-                                  "right", "sure", "हो", "हां", "हम्म", "अच्छा"}
-                    if all(w.rstrip(".,!?") in echo_words for w in words):
-                        logger.info("Echo guard: discarding all-echo transcript '%s' (%.1fs after TTS)",
-                                    transcript.strip()[:80], echo_age)
-                        self._state = SpeakingState.LISTENING
-                        return None
+        # --- Process the turn ---
+        self.start_speaking()
+        logger.info("Turn %d - Customer: %s", self.turn_count, transcript)
 
-            logger.info("Turn %d - Customer: %s", self.turn_count, transcript)
+        if db_session and self.conv_id:
+            source = "deepgram_streaming" if self._use_streaming_stt else "batch_stt"
+            await self._save_message(db_session, "customer", transcript, {"source": source, "turn": self.turn_count})
 
-            # Save customer message
-            if db_session and self.conv_id:
-                await self._save_message(db_session, "customer", transcript, {"source": "sarvam_stt", "turn": self.turn_count})
-
+        try:
             # --- Streaming LLM + sentence-pipeline TTS ---
             if on_audio:
                 try:
-                    full_response = ""
-                    last_ai_response = None
-
-                    async for sentence, ai_resp in ai_engine.process_message_stream(
-                        customer_message=transcript,
-                        conversation_history=self.conversation_history,
-                        language=self.language,
-                        system_prompt=self.system_prompt,
-                        company_name=self.tenant_name,
-                    ):
-                        if self._barge_in_event.is_set():
-                            logger.info("Barge-in: stopping LLM+TTS pipeline")
-                            if sentence:
-                                full_response += (" " if full_response else "") + sentence
-                            break
-
-                        if sentence:
-                            full_response += (" " if full_response else "") + sentence
-
-                        if ai_resp is not None:
-                            last_ai_response = ai_resp
-
-                        # Stream this sentence to TTS immediately
-                        if sentence:
-                            try:
-                                async for chunk in sarvam.synthesize_stream(sentence, self.language, self.speaker):
-                                    if self._barge_in_event.is_set():
-                                        logger.info("Barge-in: stopping TTS stream mid-sentence")
-                                        break
-                                    await on_audio(chunk)
-                            except Exception:
-                                logger.warning("Streaming TTS failed for sentence, trying batch")
-                                try:
-                                    tts_audio = await sarvam.synthesize(sentence, self.language, self.speaker)
-                                    mulaw_audio = _wav_to_mulaw(tts_audio)
-                                    await on_audio(mulaw_audio)
-                                except Exception:
-                                    logger.exception("Batch TTS also failed for sentence")
-
-                    # Update conversation state
-                    ai_text = full_response.strip()
-                    if ai_text:
-                        logger.info("Turn %d - AI: %s (streamed)", self.turn_count, ai_text[:80])
-                        self.conversation_history.append({"role": "user", "content": transcript})
-                        self.conversation_history.append({"role": "assistant", "content": ai_text})
-                        self.turn_count += 1
-
-                        if db_session and self.conv_id:
-                            confidence = last_ai_response.confidence if last_ai_response else 0.85
-                            should_esc = last_ai_response.should_escalate if last_ai_response else False
-                            await self._save_message(db_session, "ai", ai_text, {
-                                "confidence": confidence,
-                                "should_escalate": should_esc,
-                                "turn": self.turn_count,
-                            })
-
-                        if last_ai_response:
-                            self.should_escalate = last_ai_response.should_escalate
-                            self.should_end_call = last_ai_response.should_end_call
-
-                    return b""  # signal: audio streamed via callback
-
+                    return await self._stream_llm_tts(transcript, db_session, on_audio)
                 except Exception:
                     logger.exception("Streaming pipeline failed, falling back to batch")
-                    # Fall through to batch path
 
-            # --- Batch fallback (non-streaming or streaming failure) ---
-            ai_response = await ai_engine.process_message(
-                customer_message=transcript,
-                conversation_history=self.conversation_history,
-                language=self.language,
-                system_prompt=self.system_prompt,
-                company_name=self.tenant_name,
-            )
-            logger.info("Turn %d - AI: %s (escalate=%s)", self.turn_count, ai_response.text[:80], ai_response.should_escalate)
-
-            self.conversation_history.append({"role": "user", "content": transcript})
-            self.conversation_history.append({"role": "assistant", "content": ai_response.text})
-            self.turn_count += 1
-
-            if db_session and self.conv_id:
-                await self._save_message(db_session, "ai", ai_response.text, {
-                    "confidence": ai_response.confidence,
-                    "should_escalate": ai_response.should_escalate,
-                    "turn": self.turn_count,
-                })
-
-            self.should_escalate = ai_response.should_escalate
-            self.should_end_call = ai_response.should_end_call
-
-            # TTS -- truncate long responses to keep latency low
-            tts_text = ai_response.text
-            if len(tts_text) > 300:
-                cut = tts_text[:300].rfind(".")
-                tts_text = tts_text[:cut + 1] if cut > 100 else tts_text[:300]
-
-            tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker)
-            mulaw_audio = _wav_to_mulaw(tts_audio)
-            return mulaw_audio
+            # --- Batch fallback ---
+            return await self._batch_llm_tts(transcript, db_session)
 
         except httpx.HTTPStatusError as exc:
-            logger.error(
-                "Sarvam API call failed in turn %d (HTTP %d): %s. Check SARVAM_API_KEY.",
-                self.turn_count, exc.response.status_code, exc.response.text[:200],
-            )
+            logger.error("API error in turn %d (HTTP %d): %s",
+                         self.turn_count, exc.response.status_code, exc.response.text[:200])
             self._state = SpeakingState.LISTENING
             return None
         except Exception:
-            logger.exception("Unexpected error in voice AI turn %d", self.turn_count)
+            logger.exception("Error in voice AI turn %d", self.turn_count)
             self._state = SpeakingState.LISTENING
             return None
+
+    async def _batch_transcribe(self) -> str | None:
+        """Batch STT from audio buffer (Marathi fallback)."""
+        min_speech_bytes = int(self._vad.config.min_speech_ms / 1000 * 8000)
+        if len(self.audio_buffer) < min_speech_bytes:
+            self.audio_buffer.clear()
+            self._silence_vad_frames = 0
+            return None
+
+        audio_data = bytes(self.audio_buffer)
+        self.audio_buffer.clear()
+        self._silence_vad_frames = 0
+
+        # Trim trailing silence
+        trim_chunk = 160
+        while len(audio_data) > trim_chunk:
+            tail_pcm = audioop.ulaw2lin(audio_data[-trim_chunk:], 2)
+            if audioop.rms(tail_pcm, 2) >= 400:
+                break
+            audio_data = audio_data[:-trim_chunk]
+        if len(audio_data) < min_speech_bytes:
+            return None
+
+        wav_data = _mulaw_to_wav(audio_data)
+        transcript = await sarvam.transcribe(wav_data, language=self.language)
+        return transcript.strip() if transcript else None
+
+    async def _stream_llm_tts(self, transcript: str, db_session, on_audio) -> bytes:
+        """Streaming LLM -> sentence-pipelined TTS."""
+        full_response = ""
+        last_ai_response = None
+
+        async for sentence, ai_resp in ai_engine.process_message_stream(
+            customer_message=transcript,
+            conversation_history=self.conversation_history,
+            language=self.language,
+            system_prompt=self.system_prompt,
+            company_name=self.tenant_name,
+        ):
+            if self._barge_in_event.is_set():
+                logger.info("Barge-in: stopping LLM+TTS pipeline")
+                if sentence:
+                    full_response += (" " if full_response else "") + sentence
+                break
+
+            if sentence:
+                full_response += (" " if full_response else "") + sentence
+            if ai_resp is not None:
+                last_ai_response = ai_resp
+
+            if sentence:
+                try:
+                    async for chunk in sarvam.synthesize_stream(sentence, self.language, self.speaker):
+                        if self._barge_in_event.is_set():
+                            logger.info("Barge-in: stopping TTS stream mid-sentence")
+                            break
+                        await on_audio(chunk)
+                except Exception:
+                    logger.warning("Streaming TTS failed for sentence, trying batch")
+                    try:
+                        tts_audio = await sarvam.synthesize(sentence, self.language, self.speaker)
+                        await on_audio(_wav_to_mulaw(tts_audio))
+                    except Exception:
+                        logger.exception("Batch TTS also failed")
+
+        ai_text = full_response.strip()
+        if ai_text:
+            logger.info("Turn %d - AI: %s (streamed)", self.turn_count, ai_text[:80])
+            self.conversation_history.append({"role": "user", "content": transcript})
+            self.conversation_history.append({"role": "assistant", "content": ai_text})
+            self.turn_count += 1
+
+            if db_session and self.conv_id:
+                confidence = last_ai_response.confidence if last_ai_response else 0.85
+                should_esc = last_ai_response.should_escalate if last_ai_response else False
+                await self._save_message(db_session, "ai", ai_text, {
+                    "confidence": confidence,
+                    "should_escalate": should_esc,
+                    "turn": self.turn_count,
+                })
+
+            if last_ai_response:
+                self.should_escalate = last_ai_response.should_escalate
+                self.should_end_call = last_ai_response.should_end_call
+
+        return b""  # signal: audio streamed
+
+    async def _batch_llm_tts(self, transcript: str, db_session) -> bytes:
+        """Batch LLM -> batch TTS fallback."""
+        ai_response = await ai_engine.process_message(
+            customer_message=transcript,
+            conversation_history=self.conversation_history,
+            language=self.language,
+            system_prompt=self.system_prompt,
+            company_name=self.tenant_name,
+        )
+        logger.info("Turn %d - AI: %s (escalate=%s)", self.turn_count, ai_response.text[:80], ai_response.should_escalate)
+
+        self.conversation_history.append({"role": "user", "content": transcript})
+        self.conversation_history.append({"role": "assistant", "content": ai_response.text})
+        self.turn_count += 1
+
+        if db_session and self.conv_id:
+            await self._save_message(db_session, "ai", ai_response.text, {
+                "confidence": ai_response.confidence,
+                "should_escalate": ai_response.should_escalate,
+                "turn": self.turn_count,
+            })
+
+        self.should_escalate = ai_response.should_escalate
+        self.should_end_call = ai_response.should_end_call
+
+        tts_text = ai_response.text
+        if len(tts_text) > 300:
+            cut = tts_text[:300].rfind(".")
+            tts_text = tts_text[:cut + 1] if cut > 100 else tts_text[:300]
+
+        tts_audio = await sarvam.synthesize(tts_text, self.language, self.speaker)
+        return _wav_to_mulaw(tts_audio)
 
     # ------------------------------------------------------------------
     # Greeting
     # ------------------------------------------------------------------
 
     async def stream_greeting(self, on_audio) -> None:
-        """Stream greeting TTS audio via callback (~500ms to first audio).
-
-        Uses synthesize_stream for low latency. Falls back to batch if needed.
-        Leaves is_speaking=True -- caller must call finish_speaking().
-        """
         if self._greeting_sent:
             return
         self._greeting_sent = True
@@ -558,14 +585,11 @@ class VoiceAISession:
             logger.warning("Streaming greeting failed, trying batch fallback")
             try:
                 tts_audio = await sarvam.synthesize(greeting, self.language, self.speaker)
-                mulaw_audio = _wav_to_mulaw(tts_audio)
-                await on_audio(mulaw_audio)
-                logger.info("Greeting batch fallback: %d bytes mulaw", len(mulaw_audio))
+                await on_audio(_wav_to_mulaw(tts_audio))
             except Exception:
                 logger.exception("Greeting TTS completely failed")
 
     async def get_greeting_audio(self) -> bytes | None:
-        """Generate greeting TTS audio (batch fallback for non-streaming callers)."""
         if self._greeting_sent:
             return None
         self._greeting_sent = True
@@ -576,17 +600,9 @@ class VoiceAISession:
         )
         try:
             tts_audio = await sarvam.synthesize(greeting, self.language, self.speaker)
-            mulaw_audio = _wav_to_mulaw(tts_audio)
-            logger.info("Greeting audio generated: %d bytes WAV -> %d bytes mulaw", len(tts_audio), len(mulaw_audio))
-            return mulaw_audio
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "Sarvam TTS greeting failed (HTTP %d): %s. Check SARVAM_API_KEY.",
-                exc.response.status_code, exc.response.text[:200],
-            )
-            return None
+            return _wav_to_mulaw(tts_audio)
         except Exception:
-            logger.exception("Unexpected error generating greeting audio")
+            logger.exception("Greeting TTS failed")
             return None
 
     # ------------------------------------------------------------------

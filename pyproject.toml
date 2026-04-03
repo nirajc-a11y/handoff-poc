@@ -16,6 +16,10 @@ dependencies = [
     "twilio>=9.0.0",
     "python-multipart>=0.0.12",
     "audioop-lts>=0.2.1; python_version>='3.13'",
+    "websockets>=12.0",
+    "silero-vad>=5.1",
+    "onnxruntime>=1.17.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]

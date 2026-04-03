@@ -1,11 +1,13 @@
 """Plivo bidirectional audio stream WebSocket endpoint.
 
-Receives raw mulaw audio from Plivo <Stream>, processes through
-VoiceAISession (Sarvam STT -> Groq LLM -> Sarvam TTS), sends audio back.
+Receives raw mulaw audio from Plivo <Stream>, forwards to Deepgram for
+real-time STT, processes through VoiceAISession (Groq LLM -> Sarvam TTS),
+sends audio back.
 
 Production features:
+- Deepgram streaming STT: continuous transcription, no audio cropping
+- MinWords barge-in: user can interrupt AI via real speech (not echo)
 - Streaming greeting TTS (~500ms to first audio)
-- Barge-in: clearAudio + cancel TTS when user interrupts
 - Sentence-pipelined TTS via streaming LLM
 """
 
@@ -39,7 +41,6 @@ async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
     """Trigger AI->Human escalation by redirecting the live Plivo call."""
     conv_uuid = _uuid.UUID(conv_id)
 
-    # 1. State machine transition
     try:
         await handoff_engine.process_trigger(
             db=db,
@@ -53,7 +54,6 @@ async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
         logger.exception("Failed to transition state for escalation: conv=%s", conv_id)
         return
 
-    # 2. Redirect the Plivo call to the escalate-to-human endpoint
     try:
         result = await db.execute(
             select(ChannelSession.provider_session_id)
@@ -94,9 +94,6 @@ async def _handle_stream_hangup(db, tenant_id: str, conv_id: str):
     conv_uuid = _uuid.UUID(conv_id)
 
     try:
-        # Transition: AI_HANDLING -> WRAP_UP -> ENDED
-        # Each trigger is guarded — Plivo call-status webhook may race and
-        # transition the conversation to ENDED before we get here.
         for trigger in (Trigger.AGENT_END, Trigger.DISPOSITION_SUBMITTED):
             try:
                 await handoff_engine.process_trigger(
@@ -123,7 +120,7 @@ async def plivo_audio_stream(
     conv_id: str = "",
     language: str = "en",
     speaker: str = "ritu",
-    skip_greeting: str = "",  # kept for backward compat, now ignored
+    skip_greeting: str = "",
 ):
     """Bidirectional audio stream from Plivo <Stream>."""
     await ws.accept()
@@ -159,24 +156,20 @@ async def plivo_audio_stream(
     ws_open = True
     processing_lock = asyncio.Lock()
 
-    # Track bytes sent during streaming TTS to calculate playback wait.
-    # Sarvam generates audio faster than real-time, so Plivo buffers and
-    # plays it back over a longer duration than we spend sending.
+    # Track bytes sent during streaming TTS to calculate playback wait
     _stream_bytes_sent = 0
-    _stream_start_time = 0.0  # 0.0 = sentinel meaning "no chunk sent yet"
-    _ECHO_BUFFER = 0.5  # Extra wait for phone-line echo round-trip (300-500ms)
+    _stream_start_time = 0.0
+    _ECHO_BUFFER = 0.5
 
     # ------------------------------------------------------------------
     # Audio send helpers
     # ------------------------------------------------------------------
 
     async def send_audio(mulaw_data: bytes):
-        """Send mulaw audio back to Plivo in chunks."""
         nonlocal ws_open
         if not stream_started or not ws_open:
             return
-        logger.info("Sending %d bytes of mulaw audio (%d chunks)", len(mulaw_data), len(mulaw_data) // 320 + 1)
-        chunk_size = 320  # 20ms at 8kHz mulaw
+        chunk_size = 320
         for i in range(0, len(mulaw_data), chunk_size):
             if not ws_open or session.barge_in_requested:
                 break
@@ -197,40 +190,26 @@ async def plivo_audio_stream(
                 break
 
     def _reset_stream_tracker():
-        """Reset streaming playback tracker before a new TTS stream."""
         nonlocal _stream_bytes_sent, _stream_start_time
         _stream_bytes_sent = 0
-        _stream_start_time = 0.0  # Will be set on first send_chunk call
+        _stream_start_time = 0.0
 
     async def _wait_for_playback():
-        """Wait for Plivo to finish playing buffered streaming audio.
-
-        Streaming TTS sends chunks to Plivo faster than real-time (e.g.
-        3.85s of audio generated in 1.3s). Plivo queues them and plays
-        back at real-time speed. We must wait for that playback to end
-        before calling finish_speaking(), otherwise the system hears
-        its own voice as echo and transcribes it as phantom 'Yes'.
-
-        Also adds an echo buffer (500ms) for phone-line round-trip delay.
-        The wait is interruptible by barge-in.
-        """
         if _stream_bytes_sent == 0 or _stream_start_time == 0.0:
             return
         playback_secs = _stream_bytes_sent / 8000
         elapsed = asyncio.get_event_loop().time() - _stream_start_time
         remaining = playback_secs - elapsed + _ECHO_BUFFER
         if remaining > 0:
-            logger.info("Waiting %.1fs for Plivo playback to finish (%d bytes = %.1fs audio, sent in %.1fs, +%.1fs echo buffer)",
-                        remaining, _stream_bytes_sent, playback_secs, elapsed, _ECHO_BUFFER)
-            # Wait for playback OR barge-in, whichever comes first
+            logger.info("Waiting %.1fs for Plivo playback (%d bytes = %.1fs audio, sent in %.1fs)",
+                        remaining, _stream_bytes_sent, playback_secs, elapsed)
             try:
                 await asyncio.wait_for(session._barge_in_event.wait(), timeout=remaining)
                 logger.info("Barge-in interrupted playback wait")
             except asyncio.TimeoutError:
-                pass  # Normal: playback finished without interruption
+                pass
 
     async def send_chunk(mulaw_chunk: bytes):
-        """Send a single streaming TTS chunk to Plivo immediately."""
         nonlocal ws_open, _stream_bytes_sent, _stream_start_time
         if not stream_started or not ws_open:
             return
@@ -244,24 +223,20 @@ async def plivo_audio_stream(
                     "payload": base64.b64encode(mulaw_chunk).decode("ascii"),
                 },
             })
-            # Start timer on first chunk — not before STT/LLM processing
             if _stream_start_time == 0.0:
                 _stream_start_time = asyncio.get_event_loop().time()
             _stream_bytes_sent += len(mulaw_chunk)
-            # Forward AI audio to supervisor listeners
             if _handle.listeners:
                 await _handle.forward_to_listeners(mulaw_chunk, "ai")
         except Exception:
             ws_open = False
 
     async def send_chunk_with_bargein(mulaw_chunk: bytes):
-        """Send a streaming TTS chunk, but stop if barge-in detected."""
         if session.barge_in_requested:
             return
         await send_chunk(mulaw_chunk)
 
     async def send_clear_audio():
-        """Tell Plivo to stop playing any queued audio (barge-in)."""
         nonlocal ws_open
         if not stream_started or not ws_open:
             return
@@ -301,21 +276,16 @@ async def plivo_audio_stream(
 
                 if session.barge_in_requested:
                     await send_clear_audio()
-                    # Always use reset_listening — preserves barge-in buffer, no cooldown.
-                    # User is actively speaking (proven by barge-in), so no echo guard needed.
                     session.reset_listening()
                     turn_had_messages = mulaw_response is not None
-                    logger.info("Barge-in handled: cancelled TTS, buffer preserved, no cooldown")
+                    logger.info("Barge-in handled: cancelled TTS, ready for next turn")
                 elif mulaw_response == b"":
-                    # Audio was streamed via on_audio callback.
-                    # Wait for Plivo to finish playing buffered audio before listening.
                     await _wait_for_playback()
                     if session.barge_in_requested:
                         await send_clear_audio()
                     session.finish_speaking()
                     turn_had_messages = True
                 elif mulaw_response and ws_open:
-                    # Fallback: full TTS response -- send all at once
                     await send_audio(mulaw_response)
                     if session.barge_in_requested:
                         await send_clear_audio()
@@ -329,13 +299,10 @@ async def plivo_audio_stream(
                         session.finish_speaking()
                     turn_had_messages = True
                 else:
-                    # Null turn (noise, hallucination, empty STT).
-                    # No TTS played — lightweight reset, no cooldown or echo guard.
                     session.reset_listening()
 
                 await db.commit()
 
-                # Notify frontend of new messages for ALL paths that saved data
                 if turn_had_messages and conv_id and tenant_id:
                     await event_bus.publish(Event(
                         topic="conversation.message_added",
@@ -343,11 +310,29 @@ async def plivo_audio_stream(
                         payload={"conversation_id": conv_id},
                     ))
 
-                # After sending AI response, check if escalation or hangup is needed
                 if session.should_escalate and conv_id and tenant_id:
                     await _handle_stream_escalation(db, tenant_id, conv_id)
                 elif session.should_end_call and conv_id and tenant_id:
                     await _handle_stream_hangup(db, tenant_id, conv_id)
+
+    # ------------------------------------------------------------------
+    # Background task: watch for Deepgram turn signals
+    # ------------------------------------------------------------------
+
+    async def _turn_watcher():
+        """Wait for Deepgram utterance_end events and trigger turn processing."""
+        while ws_open:
+            has_turn = await session.wait_for_turn(timeout=2.0)
+            if not has_turn:
+                continue
+            # Wait for processing lock to be free (don't tight-loop)
+            while processing_lock.locked() and ws_open:
+                await asyncio.sleep(0.1)
+            if ws_open and session._final_transcripts:
+                session._pending_turn.clear()
+                asyncio.create_task(process_and_respond())
+
+    turn_watcher_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # WebSocket event loop
@@ -370,13 +355,18 @@ async def plivo_audio_stream(
                 _handle.stream_sid = stream_sid
                 logger.info("Stream started: sid=%s", stream_sid)
 
-                # Stream greeting with low latency (~500ms to first audio)
-                # Acquire processing_lock to prevent interleaved sends with turn processing
+                # Start Deepgram streaming STT
+                await session.start_deepgram()
+
+                # Start turn watcher for Deepgram-driven endpointing
+                if session._use_streaming_stt:
+                    turn_watcher_task = asyncio.create_task(_turn_watcher())
+
+                # Stream greeting
                 async def _stream_greeting():
                     async with processing_lock:
                         _reset_stream_tracker()
                         await session.stream_greeting(send_chunk)
-                        # Wait for Plivo to finish playing buffered greeting audio
                         await _wait_for_playback()
                         if session.barge_in_requested:
                             await send_clear_audio()
@@ -390,8 +380,10 @@ async def plivo_audio_stream(
                     # Forward caller audio to supervisor listeners
                     if _handle.listeners:
                         await _handle.forward_to_listeners(audio_bytes, "caller")
-                    speech_pause = session.add_audio(audio_bytes)
-                    if speech_pause:
+                    # Feed audio to session (Deepgram + VAD)
+                    speech_pause = await session.add_audio(audio_bytes)
+                    # For batch STT fallback (no Deepgram), use old trigger
+                    if speech_pause and not session._use_streaming_stt:
                         asyncio.create_task(process_and_respond())
 
             elif event_type == "stop":
@@ -404,6 +396,10 @@ async def plivo_audio_stream(
         logger.exception("Error in Plivo audio stream")
     finally:
         ws_open = False
+        # Cleanup
+        if turn_watcher_task and not turn_watcher_task.done():
+            turn_watcher_task.cancel()
+        await session.stop_deepgram()
         if conv_id:
             session_registry.unregister(conv_id)
         logger.info("Audio stream ended: conv=%s, turns=%d", conv_id, session.turn_count)

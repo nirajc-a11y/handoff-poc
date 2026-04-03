@@ -52,6 +52,11 @@ async def lifespan(app: FastAPI):
         provider_registry.register("telephony", "twilio", twilio_provider)
         logger.info("Twilio telephony provider registered")
 
+    # Pre-load Silero VAD ONNX model so first call has no cold-start delay
+    from app.voice_ai.vad import _get_model_path
+    _get_model_path()
+    logger.info("Silero VAD model pre-loaded")
+
     yield
     # Shutdown
     from app.voice_ai import sarvam

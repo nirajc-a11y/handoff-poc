@@ -42,10 +42,11 @@ async def close_client():
 
 
 async def transcribe(audio_data: bytes, language: str = "en") -> str:
-    """Transcribe audio using Groq Whisper (primary) with Sarvam fallback.
+    """Transcribe audio using the best provider per language.
 
-    Groq Whisper is significantly more accurate for telephony audio.
-    Falls back to Sarvam saarika if Groq is unavailable.
+    English: Groq Whisper (more accurate for telephony audio)
+    Indian languages (mr, hi): Sarvam saarika (better for Indian languages)
+    Each falls back to the other if unavailable.
 
     Args:
         audio_data: Raw audio bytes (WAV format)
@@ -53,15 +54,26 @@ async def transcribe(audio_data: bytes, language: str = "en") -> str:
     Returns:
         Transcribed text
     """
-    # Primary: Groq Whisper
-    if settings.groq_api_key:
-        try:
+    if language in ("mr", "hi"):
+        # Indian languages: Sarvam primary, Groq fallback
+        if settings.sarvam_api_key:
+            try:
+                return await _transcribe_sarvam(audio_data, language)
+            except Exception as exc:
+                logger.warning("Sarvam STT failed for %s, falling back to Groq: %s", language, exc)
+        if settings.groq_api_key:
             return await _transcribe_groq(audio_data, language)
-        except Exception as exc:
-            logger.warning("Groq STT failed, falling back to Sarvam: %s", exc)
+    else:
+        # English: Groq Whisper primary, Sarvam fallback
+        if settings.groq_api_key:
+            try:
+                return await _transcribe_groq(audio_data, language)
+            except Exception as exc:
+                logger.warning("Groq STT failed, falling back to Sarvam: %s", exc)
+        if settings.sarvam_api_key:
+            return await _transcribe_sarvam(audio_data, language)
 
-    # Fallback: Sarvam saarika
-    return await _transcribe_sarvam(audio_data, language)
+    raise ValueError("No STT provider configured. Set SARVAM_API_KEY or GROQ_API_KEY.")
 
 
 async def _transcribe_groq(audio_data: bytes, language: str = "en") -> str:

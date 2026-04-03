@@ -1,9 +1,18 @@
-"""AI engine for LLM-powered customer interactions with Groq inference and mock fallback."""
+"""AI engine for LLM-powered customer interactions.
+
+Primary: Sarvam 30B (multilingual, optimized for Indian languages)
+Fallback: Groq Llama (if Sarvam unavailable)
+Last resort: Mock responses (no API keys configured)
+"""
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from dataclasses import dataclass
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +73,7 @@ class AIResponse:
 
 
 class AIEngine:
-    """Processes customer messages via Groq LLM with keyword-based escalation detection."""
+    """Processes customer messages via Sarvam 30B LLM with keyword-based escalation detection."""
 
     ESCALATION_KEYWORDS: set[str] = {
         "agent",
@@ -114,14 +123,32 @@ class AIEngine:
         "फोन ठेवा",
     }
 
+    SARVAM_BASE = "https://api.sarvam.ai"
+
     def __init__(self) -> None:
         from app.config import settings
 
         self.groq_api_key: str = settings.groq_api_key
-        self.default_model: str = settings.groq_model
+        self.groq_model: str = settings.groq_model
+        self.sarvam_api_key: str = settings.sarvam_api_key
+        self.sarvam_model: str = settings.sarvam_llm_model
+
+    # Regex to strip <think>...</think> blocks from reasoning models
+    _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+    def _get_sarvam_headers(self) -> dict[str, str]:
+        return {
+            "api-subscription-key": self.sarvam_api_key,
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def _strip_think_tags(cls, text: str) -> str:
+        """Remove <think>...</think> reasoning blocks from LLM output."""
+        return cls._THINK_RE.sub("", text).strip()
 
     # ------------------------------------------------------------------
-    # Audio transcription
+    # Audio transcription (Groq Whisper — kept for batch recording use)
     # ------------------------------------------------------------------
 
     async def transcribe_audio(self, audio_url: str, audio_data: bytes | None = None) -> str:
@@ -136,9 +163,7 @@ class AIEngine:
             return ""
 
         try:
-            # Download only if audio_data not provided
             if audio_data is None:
-                import httpx
                 async with httpx.AsyncClient(timeout=15.0) as http_client:
                     resp = await http_client.get(audio_url)
                     resp.raise_for_status()
@@ -148,7 +173,6 @@ class AIEngine:
                 logger.info("Audio too small (%d bytes), skipping transcription", len(audio_data))
                 return ""
 
-            # Send to Groq Whisper
             groq_client = AsyncGroq(api_key=self.groq_api_key)
             transcription = await groq_client.audio.transcriptions.create(
                 file=("recording.mp3", audio_data),
@@ -169,7 +193,7 @@ class AIEngine:
     async def process_message(
         self,
         customer_message: str,
-        conversation_history: list[dict],  # [{"role": "user"/"assistant", "content": "..."}]
+        conversation_history: list[dict],
         system_prompt: str | None = None,
         confidence_threshold: float = 0.3,
         max_turns: int = 10,
@@ -178,18 +202,11 @@ class AIEngine:
     ) -> AIResponse:
         """Process a customer message and return an AI response.
 
-        Checks for escalation keywords first, then delegates to Groq (or mock
-        fallback), and finally checks whether the turn limit has been exceeded.
-
-        Parameters
-        ----------
-        language:
-            ``"en"`` for English (default) or ``"mr"`` for Marathi.
+        Checks for escalation keywords first, then delegates to Sarvam 30B
+        (or Groq / mock fallback), and finally checks turn limits.
         """
-        # Select language-specific escalation keywords
         keywords = self.ESCALATION_KEYWORDS_MR if language == "mr" else self.ESCALATION_KEYWORDS
 
-        # Use language-specific system prompt when none is provided
         if system_prompt is None:
             system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
 
@@ -225,17 +242,25 @@ class AIEngine:
                     should_end_call=True,
                 )
 
-        # 2. Determine turn count (each user+assistant pair counts as one turn)
+        # 2. Turn count
         turn_count = len(conversation_history) // 2
 
-        # 3. Generate a response via Groq or the mock fallback
+        # 3. Call LLM: Groq primary (fast TTFT, no reasoning overhead),
+        #    Sarvam fallback, mock last resort
+        text, confidence = None, 0.85
         if self.groq_api_key and _GROQ_AVAILABLE:
             try:
                 text, confidence = await self._call_groq(system_prompt, conversation_history, customer_message)
             except Exception:
-                logger.exception("Groq API call failed; falling back to mock response")
-                return self._mock_response(customer_message, turn_count, language)
-        else:
+                logger.exception("Groq LLM failed; trying Sarvam fallback")
+
+        if text is None and self.sarvam_api_key:
+            try:
+                text, confidence = await self._call_sarvam(system_prompt, conversation_history, customer_message)
+            except Exception:
+                logger.exception("Sarvam LLM also failed; using mock response")
+
+        if text is None:
             return self._mock_response(customer_message, turn_count, language)
 
         # 4. Check turn limit
@@ -247,7 +272,7 @@ class AIEngine:
                 escalation_reason="max_turns_exceeded",
             )
 
-        # 5. Determine escalation based on confidence threshold
+        # 5. Confidence-based escalation
         should_escalate = confidence < confidence_threshold
         escalation_reason = f"low_confidence ({confidence:.2f})" if should_escalate else None
 
@@ -259,7 +284,144 @@ class AIEngine:
         )
 
     # ------------------------------------------------------------------
-    # Groq integration
+    # Sarvam 30B integration
+    # ------------------------------------------------------------------
+
+    async def _call_sarvam(
+        self,
+        system_prompt: str,
+        history: list[dict],
+        message: str,
+    ) -> tuple[str, float]:
+        """Call Sarvam chat completion API (OpenAI-compatible)."""
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history[-10:])
+        messages.append({"role": "user", "content": message})
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            resp = await client.post(
+                f"{self.SARVAM_BASE}/v1/chat/completions",
+                headers=self._get_sarvam_headers(),
+                json={
+                    "model": self.sarvam_model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 150,
+                },
+            )
+            if resp.status_code >= 400:
+                logger.error("Sarvam LLM error %d: %s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+
+        result = resp.json()
+        text = (result["choices"][0]["message"]["content"] or "").strip()
+        text = self._strip_think_tags(text)
+        logger.info("Sarvam LLM: %s", text[:100])
+        return text, 0.85
+
+    async def _call_sarvam_stream(
+        self,
+        system_prompt: str,
+        history: list[dict],
+        message: str,
+    ):
+        """Stream Sarvam chat completion, yielding sentences as they complete.
+
+        Skips <think>...</think> reasoning blocks from the stream.
+        Yields text at sentence boundaries (. ! ?) so TTS can start on
+        the first sentence while the LLM generates the rest.
+        """
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history[-10:])
+        messages.append({"role": "user", "content": message})
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{self.SARVAM_BASE}/v1/chat/completions",
+                headers=self._get_sarvam_headers(),
+                json={
+                    "model": self.sarvam_model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 150,
+                    "stream": True,
+                },
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    logger.error("Sarvam LLM stream error %d: %s", resp.status_code, body[:500])
+                    resp.raise_for_status()
+
+                buffer = ""
+                in_think_block = False  # Track <think> blocks to skip reasoning
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {}).get("content") or ""
+                    if not delta:
+                        continue
+
+                    # Skip <think>...</think> reasoning blocks
+                    if in_think_block:
+                        if "</think>" in delta:
+                            # End of think block — keep text after closing tag
+                            delta = delta.split("</think>", 1)[1]
+                            in_think_block = False
+                            if not delta:
+                                continue
+                        else:
+                            continue  # Still inside think block, skip
+                    if "<think>" in delta:
+                        # Start of think block — keep text before opening tag
+                        before, _, after = delta.partition("<think>")
+                        if before:
+                            buffer += before
+                        if "</think>" in after:
+                            # Think block opened and closed in same chunk
+                            delta = after.split("</think>", 1)[1]
+                            if not delta:
+                                continue
+                            buffer += delta
+                        else:
+                            in_think_block = True
+                            continue
+                    else:
+                        buffer += delta
+
+                    # Yield complete sentences
+                    while True:
+                        best_idx = -1
+                        for sep in [". ", "! ", "? ", ".\n", "!\n", "?\n"]:
+                            idx = buffer.find(sep)
+                            if idx != -1 and (best_idx == -1 or idx < best_idx):
+                                best_idx = idx
+                        if best_idx != -1:
+                            sentence = buffer[:best_idx + 2].strip()
+                            buffer = buffer[best_idx + 2:]
+                            if sentence:
+                                yield sentence
+                        else:
+                            break
+
+                # Yield remaining text (strip any residual think tags)
+                remaining = self._strip_think_tags(buffer)
+                if remaining:
+                    yield remaining
+
+    # ------------------------------------------------------------------
+    # Groq integration (fallback)
     # ------------------------------------------------------------------
 
     async def _call_groq(
@@ -268,16 +430,15 @@ class AIEngine:
         history: list[dict],
         message: str,
     ) -> tuple[str, float]:
-        """Call the Groq chat completion API and return the response text."""
+        """Call the Groq chat completion API (fallback)."""
         client = AsyncGroq(api_key=self.groq_api_key)
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        # Keep only last 10 messages to reduce prompt size and latency
         messages.extend(history[-10:])
         messages.append({"role": "user", "content": message})
 
         completion = await client.chat.completions.create(
-            model=self.default_model,
+            model=self.groq_model,
             messages=messages,
             temperature=0.7,
             max_tokens=150,
@@ -292,11 +453,7 @@ class AIEngine:
         history: list[dict],
         message: str,
     ):
-        """Stream Groq chat completion, yielding sentences as they complete.
-
-        Yields text at sentence boundaries (. ! ?) so TTS can start on
-        the first sentence while the LLM generates the rest.
-        """
+        """Stream Groq chat completion (fallback), yielding sentences."""
         client = AsyncGroq(api_key=self.groq_api_key)
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -304,7 +461,7 @@ class AIEngine:
         messages.append({"role": "user", "content": message})
 
         stream = await client.chat.completions.create(
-            model=self.default_model,
+            model=self.groq_model,
             messages=messages,
             temperature=0.7,
             max_tokens=150,
@@ -315,7 +472,6 @@ class AIEngine:
         async for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             buffer += delta
-            # Yield complete sentences
             while True:
                 best_idx = -1
                 for sep in [". ", "! ", "? ", ".\n", "!\n", "?\n"]:
@@ -323,13 +479,12 @@ class AIEngine:
                     if idx != -1 and (best_idx == -1 or idx < best_idx):
                         best_idx = idx
                 if best_idx != -1:
-                    sentence = buffer[: best_idx + 2].strip()
-                    buffer = buffer[best_idx + 2 :]
+                    sentence = buffer[:best_idx + 2].strip()
+                    buffer = buffer[best_idx + 2:]
                     if sentence:
                         yield sentence
                 else:
                     break
-        # Yield any remaining text
         if buffer.strip():
             yield buffer.strip()
 
@@ -385,24 +540,33 @@ class AIEngine:
                 )
                 return
 
-        # Stream from Groq — use tenant prompt if provided, else language default
+        # Stream LLM: Groq primary (fast, no reasoning tags), Sarvam fallback
         if system_prompt is None:
             system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
+
         if self.groq_api_key and _GROQ_AVAILABLE:
             try:
                 async for sentence in self._call_groq_stream(
                     system_prompt, conversation_history, customer_message
                 ):
                     yield sentence, None
+                return
             except Exception:
-                logger.exception("Groq streaming failed; using mock")
-                turn_count = len(conversation_history) // 2
-                resp = self._mock_response(customer_message, turn_count, language)
-                yield resp.text, resp
-        else:
-            turn_count = len(conversation_history) // 2
-            resp = self._mock_response(customer_message, turn_count, language)
-            yield resp.text, resp
+                logger.exception("Groq streaming failed; trying Sarvam fallback")
+
+        if self.sarvam_api_key:
+            try:
+                async for sentence in self._call_sarvam_stream(
+                    system_prompt, conversation_history, customer_message
+                ):
+                    yield sentence, None
+                return
+            except Exception:
+                logger.exception("Sarvam LLM streaming also failed; using mock")
+
+        turn_count = len(conversation_history) // 2
+        resp = self._mock_response(customer_message, turn_count, language)
+        yield resp.text, resp
 
     # ------------------------------------------------------------------
     # Mock fallback

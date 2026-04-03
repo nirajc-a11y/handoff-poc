@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/handoff_poc"
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
+
+    # Sarvam LLM (Sarvam 30B — multilingual, optimized for Indian languages)
+    sarvam_llm_model: str = "sarvam-m"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
 
@@ -26,6 +29,13 @@ class Settings(BaseSettings):
 
     # Sarvam AI (Indian language STT/TTS)
     sarvam_api_key: str = ""
+
+    # Deepgram (streaming STT)
+    deepgram_api_key: str = ""
+
+    # Voice Activity Detection (Silero VAD)
+    vad_threshold: float = 0.5
+    vad_endpointing_profile: str = "ai_conversation"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
