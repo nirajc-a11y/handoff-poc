@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -41,6 +42,14 @@ class ConversationNotFoundError(Exception):
     def __init__(self, conversation_id: UUID) -> None:
         self.conversation_id = conversation_id
         super().__init__(f"Conversation not found: {conversation_id}")
+
+
+class ConversationLockedError(Exception):
+    """Raised when a conversation row is already locked by another transaction."""
+
+    def __init__(self, conversation_id: UUID) -> None:
+        self.conversation_id = conversation_id
+        super().__init__(f"Conversation is locked by another transaction: {conversation_id}")
 
 
 class HandoffEngine:
@@ -322,9 +331,18 @@ class HandoffEngine:
             # We must update the state manually before re-entering
             # ``process_trigger`` would try to lock the row again (already
             # locked), so we handle the assignment inline instead.
-            await self._handle_agent_assignment(
-                db, conversation, {**metadata, "agent_id": str(agent_id)},
-            )
+            try:
+                await self._handle_agent_assignment(
+                    db, conversation, {**metadata, "agent_id": str(agent_id)},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to assign agent inline for conversation %s "
+                    "(tenant=%s) — leaving in QUEUED_FOR_HUMAN",
+                    conversation.id,
+                    conversation.tenant_id,
+                )
+                return
             # Advance the state directly since we're bypassing the outer
             # process_trigger flow.
             conversation.state = ConversationState.HUMAN_HANDLING.value
@@ -479,8 +497,11 @@ class HandoffEngine:
                     await provider.hold_call(session_id, hold_music_url=hold_music_url)
             except Exception:
                 logger.exception(
-                    "Failed to place call on hold via provider (conversation %s)",
+                    "Failed to place call on hold via provider "
+                    "(conversation=%s, state=%s, tenant=%s)",
                     conversation.id,
+                    conversation.state,
+                    conversation.tenant_id,
                 )
 
     async def _handle_unhold(
@@ -502,8 +523,11 @@ class HandoffEngine:
                     await provider.unhold_call(session_id)
             except Exception:
                 logger.exception(
-                    "Failed to unhold call via provider (conversation %s)",
+                    "Failed to unhold call via provider "
+                    "(conversation=%s, state=%s, tenant=%s)",
                     conversation.id,
+                    conversation.state,
+                    conversation.tenant_id,
                 )
 
     async def _handle_wrap_up(
@@ -524,8 +548,11 @@ class HandoffEngine:
                     await provider.end_call(session_id)
             except Exception:
                 logger.exception(
-                    "Failed to hang up call via provider (conversation %s)",
+                    "Failed to hang up call via provider "
+                    "(conversation=%s, state=%s, tenant=%s)",
                     conversation.id,
+                    conversation.state,
+                    conversation.tenant_id,
                 )
 
         # Release the agent so they can take new conversations while filling
@@ -612,14 +639,20 @@ class HandoffEngine:
         db: AsyncSession,
         conversation_id: UUID,
     ) -> Conversation:
-        """Load a conversation row with ``SELECT ... FOR UPDATE``."""
+        """Load a conversation row with ``SELECT ... FOR UPDATE NOWAIT``."""
         stmt = (
             select(Conversation)
             .options(selectinload(Conversation.channel_sessions))
             .where(Conversation.id == conversation_id)
-            .with_for_update()
+            .with_for_update(nowait=True)
         )
-        result = await db.execute(stmt)
+        try:
+            result = await db.execute(stmt)
+        except OperationalError as exc:
+            # PostgreSQL error code 55P03 = lock_not_available
+            if hasattr(exc.orig, "pgcode") and exc.orig.pgcode == "55P03":
+                raise ConversationLockedError(conversation_id) from exc
+            raise
         conversation = result.scalar_one_or_none()
 
         if conversation is None:

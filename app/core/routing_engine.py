@@ -54,6 +54,7 @@ class RoutingEngine:
             ]
             stmt = stmt.where(or_(*skill_filters))
 
+        stmt = stmt.with_for_update(skip_locked=True)
         stmt = stmt.order_by(AgentStatus.current_conversations.asc()).limit(1)
 
         result = await db.execute(stmt)

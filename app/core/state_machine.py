@@ -104,6 +104,11 @@ TRANSITIONS: Dict[
     (ConversationState.HUMAN_HANDLING, Trigger.AGENT_END): (ConversationState.WRAP_UP, "state_change"),
     (ConversationState.HUMAN_HANDLING, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
     (ConversationState.WRAP_UP, Trigger.DISPOSITION_SUBMITTED): (ConversationState.ENDED, "state_change"),
+    # -- Dead-end fixes --
+    (ConversationState.FAILED, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.TRANSFERRED, Trigger.CUSTOMER_DISCONNECT): (ConversationState.WRAP_UP, "state_change"),
+    (ConversationState.TRANSFERRED, Trigger.QUEUE_TIMEOUT): (ConversationState.HUMAN_HANDLING, "transfer_timeout"),
+    (ConversationState.IVR, Trigger.DTMF_SUBMENU): (ConversationState.IVR, "ivr_submenu"),
 }
 
 

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -41,7 +42,7 @@ class AgentStatus(Base, PrimaryKeyMixin, TenantScopedMixin):
     )
     status: Mapped[str] = mapped_column(String(20), default="offline", server_default=text("'offline'"))
     current_conversations: Mapped[int] = mapped_column(Integer, default=0)
-    last_status_change: Mapped[None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status_change: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     agent: Mapped["AgentProfile"] = relationship(back_populates="status")
