@@ -11,7 +11,7 @@ import audioop
 import logging
 from dataclasses import dataclass
 
-from livekit.agents import tts
+from livekit.agents import tts, APIConnectOptions
 
 from app.config import settings
 from app.voice_ai.sarvam import synthesize_stream, V2_TO_V3_SPEAKER
@@ -51,10 +51,10 @@ class SarvamTTS(tts.TTS):
         )
 
     def synthesize(self, text: str, *, conn_options=None) -> "SarvamChunkedStream":
-        return SarvamChunkedStream(tts=self, input_text=text, conn_options=conn_options or tts.APIConnectOptions())
+        return SarvamChunkedStream(tts=self, input_text=text, conn_options=conn_options or APIConnectOptions())
 
     def stream(self, *, conn_options=None) -> "SarvamSynthesizeStream":
-        return SarvamSynthesizeStream(tts=self, conn_options=conn_options or tts.APIConnectOptions())
+        return SarvamSynthesizeStream(tts=self, conn_options=conn_options or APIConnectOptions())
 
 
 class SarvamChunkedStream(tts.ChunkedStream):
@@ -94,7 +94,12 @@ class SarvamChunkedStream(tts.ChunkedStream):
 
 
 class SarvamSynthesizeStream(tts.SynthesizeStream):
-    """Streaming synthesis — yields PCM frames as Sarvam chunks arrive."""
+    """Streaming synthesis — yields PCM frames as Sarvam chunks arrive.
+
+    IMPORTANT: LiveKit SDK expects exactly ONE segment per synthesis stream.
+    All text inputs from the channel are concatenated and synthesized together
+    in a single segment. This avoids the "number of segments mismatch" error.
+    """
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         output_emitter.initialize(
@@ -106,19 +111,18 @@ class SarvamSynthesizeStream(tts.SynthesizeStream):
         )
 
         opts = self._tts._opts  # type: ignore[attr-defined]
-        seg_idx = 0
+
+        # Single segment for ALL text inputs — LiveKit SDK requirement
+        output_emitter.start_segment(segment_id="seg-0")
+        pushed_any = False
 
         async for text_input in self._input_ch:
             if not isinstance(text_input, str) or not text_input.strip():
                 continue
 
-            # Skip text that Sarvam will reject (no real characters)
             cleaned = text_input.strip()
             if len(cleaned) < 2:
                 continue
-
-            output_emitter.start_segment(segment_id=f"seg-{seg_idx}")
-            seg_idx += 1
 
             try:
                 async for mulaw_chunk in synthesize_stream(
@@ -130,9 +134,9 @@ class SarvamSynthesizeStream(tts.SynthesizeStream):
                     pcm_8k = audioop.ulaw2lin(mulaw_chunk, 2)
                     pcm_24k, _ = audioop.ratecv(pcm_8k, 2, 1, _SARVAM_SAMPLE_RATE, _OUTPUT_SAMPLE_RATE, None)
                     output_emitter.push(pcm_24k)
+                    pushed_any = True
             except Exception:
                 logger.warning("Sarvam TTS stream failed for text: %s", cleaned[:50])
 
-            output_emitter.end_segment()
-
+        output_emitter.end_segment()
         output_emitter.flush()

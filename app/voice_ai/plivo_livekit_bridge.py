@@ -2,12 +2,25 @@
 
 Receives mulaw audio from a Plivo bidirectional WebSocket stream,
 converts to PCM, and publishes it as an audio track in a LiveKit room.
-Subscribes to the LiveKit Agent's audio track and sends PCM->mulaw
+Subscribes to room participants' audio tracks and sends PCM->mulaw
 back to Plivo via playAudio events.
 
 IMPORTANT: Plivo's bidirectional <Stream> only delivers caller audio TO us.
 Agent audio reaches the caller ONLY via playAudio events we send back.
 LiveKit's WebRTC routing between room participants does NOT reach Plivo.
+
+Supports multiple participants (AI agent, human agent, supervisor barge)
+with automatic track subscription/unsubscription as participants join/leave.
+
+Barge-in (two layers for lowest latency):
+  1. Bridge-level: feed_audio() monitors caller RMS energy. When caller
+     speaks loudly enough during agent playback, instantly pauses outbound
+     audio and sends clearAudio — zero round-trip delay.
+  2. Agent-level: data channel {"type": "barge_in"} from the LiveKit agent
+     as a confirmation/fallback.
+
+Hold: Listens for {"type": "hold"} / {"type": "unhold"} data messages
+to pause/resume audio forwarding from participants to Plivo.
 
 This module is used when settings.use_livekit_agent is True.
 """
@@ -19,6 +32,7 @@ import audioop
 import base64
 import json
 import logging
+import time
 from uuid import UUID
 
 from livekit import api as lk_api, rtc
@@ -47,9 +61,19 @@ _LK_FRAME_DURATION_MS = 20
 _LK_SAMPLES_PER_FRAME = _LK_SAMPLE_RATE * _LK_FRAME_DURATION_MS // 1000  # 480
 _LK_FRAME_BYTES = _LK_SAMPLES_PER_FRAME * 2  # 960 bytes (16-bit mono)
 
-# Plivo sends 20ms at 8kHz mulaw = 160 bytes
+# Plivo audio format
 _PLIVO_SAMPLE_RATE = 8000
-_PLIVO_CHUNK_SIZE = 320  # 40ms at 8kHz mulaw — Plivo's preferred chunk size
+_PLIVO_CHUNK_SIZE = 160  # 20ms at 8kHz mulaw — smaller for lower latency
+
+# Bounded buffer limits to prevent latency accumulation
+_PCM_BUFFER_MAX = 4800   # 100ms at 24kHz 16-bit mono
+_MULAW_BUFFER_MAX = 1600  # 200ms at 8kHz mulaw
+
+# Bridge-level barge-in: detect caller speech energy and instantly clear Plivo audio.
+# This fires BEFORE the LiveKit agent's data channel signal arrives (~20-50ms savings).
+_BARGEIN_RMS_THRESHOLD = 600   # caller RMS above this while agent is sending = barge-in
+_BARGEIN_FRAMES_REQUIRED = 2   # consecutive high-energy frames required (40ms at 20ms/frame)
+_BARGEIN_DEBOUNCE_SEC = 0.5    # ignore duplicate barge-in within this window
 
 
 class PlivoLiveKitBridge:
@@ -57,10 +81,11 @@ class PlivoLiveKitBridge:
 
     Audio paths:
       Caller -> Plivo WS -> feed_audio() -> mulaw->PCM 24kHz -> LiveKit room -> Agent STT
-      Agent TTS -> LiveKit room -> _forward_agent_audio() -> PCM 8kHz->mulaw -> playAudio -> Plivo -> Caller
+      Agent TTS -> LiveKit room -> _forward_participant_audio() -> PCM 8kHz->mulaw -> playAudio -> Plivo -> Caller
 
-    The _forward_agent_audio path is CRITICAL — it's the only way agent audio
-    reaches the caller. Without it, the caller hears silence after the greeting.
+    Supports multiple concurrent participants. When the AI agent disconnects
+    and a human agent joins, the bridge automatically subscribes to the new
+    participant's audio track — no manual "switch" needed.
     """
 
     def __init__(
@@ -70,6 +95,7 @@ class PlivoLiveKitBridge:
         tenant_id: str,
         language: str = "en",
         company_name: str = "Demo Corp",
+        ai_system_prompt: str | None = None,
         plivo_ws_send: ...,  # async callable to send JSON to Plivo WS
         stream_sid: str = "",
     ) -> None:
@@ -77,16 +103,26 @@ class PlivoLiveKitBridge:
         self.tenant_id = tenant_id
         self.language = language
         self.company_name = company_name
+        self.ai_system_prompt = ai_system_prompt
         self._plivo_send = plivo_ws_send
         self._stream_sid = stream_sid
 
         self._room: rtc.Room | None = None
         self._audio_source: rtc.AudioSource | None = None
         self._pcm_buffer = bytearray()
-        self._mulaw_out_buffer = bytearray()
         self._running = False
-        self._subscribe_task: asyncio.Task | None = None
-        self._agent_speaking = False  # Track if agent is currently sending audio
+
+        # Multi-participant: one forwarding task per participant identity
+        self._subscribe_tasks: dict[str, asyncio.Task] = {}
+
+        # Hold state: pause audio forwarding to Plivo
+        self._hold_active = False
+
+        # Barge-in state
+        self._outbound_active = False     # True while forwarding non-silent agent audio
+        self._bargein_paused = False      # True = suppress outbound audio after barge-in
+        self._bargein_high_energy_count = 0
+        self._last_bargein_time = 0.0     # monotonic timestamp of last clearAudio
 
     @property
     def room_name(self) -> str:
@@ -113,15 +149,18 @@ class PlivoLiveKitBridge:
                 api_secret=settings.livekit_api_secret,
             )
             try:
+                room_metadata = {
+                    "tenant_id": self.tenant_id,
+                    "conversation_id": self.conversation_id,
+                    "language": self.language,
+                    "company_name": self.company_name,
+                }
+                if self.ai_system_prompt:
+                    room_metadata["ai_system_prompt"] = self.ai_system_prompt
                 await room_api.room.create_room(
                     lk_api.CreateRoomRequest(
                         name=self.room_name,
-                        metadata=json.dumps({
-                            "tenant_id": self.tenant_id,
-                            "conversation_id": self.conversation_id,
-                            "language": self.language,
-                            "company_name": self.company_name,
-                        }),
+                        metadata=json.dumps(room_metadata),
                     )
                 )
             except Exception as exc:
@@ -154,18 +193,71 @@ class PlivoLiveKitBridge:
         # 3. Connect to room
         self._room = rtc.Room()
 
-        # Subscribe to agent audio tracks — this is how agent audio reaches the caller
+        # Subscribe to audio tracks from any non-bridge participant
         @self._room.on("track_subscribed")
-        def _on_track(track, publication, participant):
-            if track.kind == rtc.TrackKind.KIND_AUDIO and participant.identity != "plivo-bridge":
-                logger.info("Subscribed to agent audio track from %s", participant.identity)
-                # Request audio at 8kHz mono to match Plivo format
-                audio_stream = rtc.AudioStream(
-                    track, sample_rate=_PLIVO_SAMPLE_RATE, num_channels=1
-                )
-                self._subscribe_task = asyncio.create_task(
-                    self._forward_agent_audio(audio_stream)
-                )
+        def _on_track_subscribed(track, publication, participant):
+            if track.kind != rtc.TrackKind.KIND_AUDIO:
+                return
+            identity = participant.identity
+            # Skip our own tracks
+            if identity == "plivo-bridge":
+                return
+            # Skip listen-only supervisors (they subscribe but don't publish audio we need)
+            if identity.startswith("supervisor-") and not identity.startswith("supervisor-barge-"):
+                logger.info("Skipping audio from listen-only supervisor %s", identity)
+                return
+            # Cancel existing task for this participant if any (e.g. track replaced)
+            if identity in self._subscribe_tasks:
+                self._subscribe_tasks[identity].cancel()
+            logger.info("Subscribed to audio track from %s in room %s", identity, self.room_name)
+            audio_stream = rtc.AudioStream(
+                track, sample_rate=_PLIVO_SAMPLE_RATE, num_channels=1
+            )
+            self._subscribe_tasks[identity] = asyncio.create_task(
+                self._forward_participant_audio(audio_stream, identity)
+            )
+
+        @self._room.on("track_unsubscribed")
+        def _on_track_unsubscribed(track, publication, participant):
+            identity = participant.identity
+            task = self._subscribe_tasks.pop(identity, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info("Cancelled audio forwarding for %s (track unsubscribed)", identity)
+
+        @self._room.on("participant_disconnected")
+        def _on_participant_disconnected(participant):
+            identity = participant.identity
+            task = self._subscribe_tasks.pop(identity, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info("Cancelled audio forwarding for %s (participant left)", identity)
+
+        # Listen for data messages: barge-in, hold, unhold
+        @self._room.on("data_received")
+        def _on_data(packet: rtc.DataPacket):
+            try:
+                raw = packet.data
+                payload = raw if isinstance(raw, bytes) else raw.encode()
+                msg = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                return
+
+            msg_type = msg.get("type")
+            if msg_type == "barge_in":
+                # Agent confirmed barge-in — clear audio (debounced)
+                asyncio.create_task(self._handle_bargein("agent-signal"))
+            elif msg_type == "hold":
+                self._hold_active = True
+                logger.info("Hold activated for conv=%s", self.conversation_id)
+            elif msg_type == "unhold":
+                self._hold_active = False
+                logger.info("Hold deactivated for conv=%s", self.conversation_id)
+
+        # Set _running BEFORE connect — the track_subscribed handler may fire
+        # during connect() if the agent is already in the pre-warmed room,
+        # and _forward_participant_audio checks this flag on every iteration.
+        self._running = True
 
         await self._room.connect(settings.livekit_url, jwt_token)
 
@@ -174,8 +266,6 @@ class PlivoLiveKitBridge:
         track = rtc.LocalAudioTrack.create_audio_track("caller-audio", self._audio_source)
         publish_opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         await self._room.local_participant.publish_track(track, publish_opts)
-
-        self._running = True
         logger.info("PlivoLiveKitBridge started: room=%s", self.room_name)
 
     # ------------------------------------------------------------------
@@ -273,17 +363,38 @@ class PlivoLiveKitBridge:
         """Feed mulaw audio from Plivo into the LiveKit room.
 
         Converts mulaw 8kHz -> PCM 16-bit 24kHz and publishes as audio frames.
+
+        Also performs bridge-level barge-in detection: if the caller's audio
+        has high energy while the agent is actively sending audio, we instantly
+        send clearAudio to Plivo — no round-trip through LiveKit needed.
         """
         if not self._running or not self._audio_source:
             return
 
         # mulaw -> PCM 16-bit at 8kHz
         pcm_8k = audioop.ulaw2lin(mulaw_bytes, 2)
+
+        # Bridge-level barge-in: detect caller speech during agent playback
+        if self._outbound_active and pcm_8k:
+            rms = audioop.rms(pcm_8k, 2)
+            if rms > _BARGEIN_RMS_THRESHOLD:
+                self._bargein_high_energy_count += 1
+                if self._bargein_high_energy_count >= _BARGEIN_FRAMES_REQUIRED:
+                    asyncio.create_task(self._handle_bargein("bridge-vad"))
+                    self._bargein_high_energy_count = 0
+            else:
+                self._bargein_high_energy_count = 0
+
         # Upsample 8kHz -> 24kHz
         pcm_24k, _ = audioop.ratecv(pcm_8k, 2, 1, _PLIVO_SAMPLE_RATE, _LK_SAMPLE_RATE, None)
 
-        # Buffer PCM and emit complete frames
+        # Bounded buffer: drop oldest if over limit
         self._pcm_buffer.extend(pcm_24k)
+        if len(self._pcm_buffer) > _PCM_BUFFER_MAX:
+            overflow = len(self._pcm_buffer) - _PCM_BUFFER_MAX
+            self._pcm_buffer = self._pcm_buffer[overflow:]
+
+        # Emit complete frames
         while len(self._pcm_buffer) >= _LK_FRAME_BYTES:
             frame_data = bytes(self._pcm_buffer[:_LK_FRAME_BYTES])
             self._pcm_buffer = self._pcm_buffer[_LK_FRAME_BYTES:]
@@ -297,33 +408,39 @@ class PlivoLiveKitBridge:
             await self._audio_source.capture_frame(frame)
 
     # ------------------------------------------------------------------
-    # Agent audio OUT: LiveKit room -> Plivo (THE CRITICAL PATH)
+    # Participant audio OUT: LiveKit room -> Plivo (THE CRITICAL PATH)
     # ------------------------------------------------------------------
 
-    async def _forward_agent_audio(self, audio_stream: rtc.AudioStream) -> None:
-        """Forward agent's audio track from LiveKit to Plivo via playAudio.
+    async def _forward_participant_audio(
+        self, audio_stream: rtc.AudioStream, identity: str
+    ) -> None:
+        """Forward a participant's audio track from LiveKit to Plivo via playAudio.
 
-        This is the ONLY path for agent audio to reach the caller.
+        This is the ONLY path for participant audio to reach the caller.
         Plivo's bidirectional stream only delivers caller audio TO us;
-        we must send agent audio BACK via playAudio events.
+        we must send participant audio BACK via playAudio events.
 
         Audio arrives as PCM 16-bit 8kHz (resampled by LiveKit's AudioStream).
-        We convert to mulaw and send in 320-byte chunks (40ms at 8kHz).
+        We convert to mulaw and send in 160-byte chunks (20ms at 8kHz).
         """
         chunks_sent = 0
         frames_received = 0
         empty_frames = 0
+        local_mulaw_buf = bytearray()
 
         logger.info(
-            "Agent audio forwarding started: conv=%s, stream_sid=%s",
-            self.conversation_id, self._stream_sid,
+            "Audio forwarding started for %s: conv=%s, stream_sid=%s",
+            identity, self.conversation_id, self._stream_sid,
         )
 
         try:
             async for event in audio_stream:
                 if not self._running:
-                    logger.info("Agent audio forwarding: bridge stopped, exiting")
                     break
+
+                # Skip forwarding when on hold
+                if self._hold_active:
+                    continue
 
                 frame: rtc.AudioFrame = event.frame
                 pcm_data = bytes(frame.data)
@@ -333,15 +450,24 @@ class PlivoLiveKitBridge:
                 if frames_received <= 5:
                     rms = audioop.rms(pcm_data, 2) if pcm_data else 0
                     logger.info(
-                        "Agent audio frame #%d: %d bytes, rms=%d, sample_rate=%d, channels=%d, samples=%d",
-                        frames_received, len(pcm_data), rms,
+                        "[%s] Audio frame #%d: %d bytes, rms=%d, sr=%d, ch=%d, samples=%d",
+                        identity, frames_received, len(pcm_data), rms,
                         frame.sample_rate, frame.num_channels, frame.samples_per_channel,
                     )
                 elif frames_received == 6:
-                    logger.info("Agent audio: suppressing per-frame logs after frame 5")
+                    logger.info("[%s] Suppressing per-frame logs after frame 5", identity)
 
                 if not pcm_data:
                     empty_frames += 1
+                    self._outbound_active = False
+                    continue
+
+                # Track outbound activity for bridge-level barge-in detection
+                rms = audioop.rms(pcm_data, 2)
+                self._outbound_active = rms > 50
+
+                # Skip sending while barge-in pause is active
+                if self._bargein_paused:
                     continue
 
                 # Convert PCM 16-bit 8kHz -> mulaw 8kHz
@@ -349,15 +475,21 @@ class PlivoLiveKitBridge:
                     mulaw_data = audioop.lin2ulaw(pcm_data, 2)
                 except audioop.error as e:
                     if frames_received <= 5:
-                        logger.warning("audioop.lin2ulaw failed on frame #%d: %s", frames_received, e)
+                        logger.warning("[%s] lin2ulaw failed on frame #%d: %s", identity, frames_received, e)
                     continue
 
-                self._mulaw_out_buffer.extend(mulaw_data)
+                local_mulaw_buf.extend(mulaw_data)
 
                 # Send buffered chunks to Plivo
-                while len(self._mulaw_out_buffer) >= _PLIVO_CHUNK_SIZE:
-                    chunk = bytes(self._mulaw_out_buffer[:_PLIVO_CHUNK_SIZE])
-                    self._mulaw_out_buffer = self._mulaw_out_buffer[_PLIVO_CHUNK_SIZE:]
+                while len(local_mulaw_buf) >= _PLIVO_CHUNK_SIZE:
+                    chunk = bytes(local_mulaw_buf[:_PLIVO_CHUNK_SIZE])
+                    local_mulaw_buf = local_mulaw_buf[_PLIVO_CHUNK_SIZE:]
+
+                    # Bounded buffer: drop oldest if backed up
+                    if len(local_mulaw_buf) > _MULAW_BUFFER_MAX:
+                        overflow = len(local_mulaw_buf) - _MULAW_BUFFER_MAX
+                        local_mulaw_buf = local_mulaw_buf[overflow:]
+
                     try:
                         await self._plivo_send({
                             "event": "playAudio",
@@ -371,19 +503,19 @@ class PlivoLiveKitBridge:
                         chunks_sent += 1
                         if chunks_sent == 1:
                             logger.info(
-                                "First agent audio chunk sent to Plivo (%d bytes, after %d frames)",
-                                _PLIVO_CHUNK_SIZE, frames_received,
+                                "[%s] First audio chunk sent to Plivo (%d bytes, after %d frames)",
+                                identity, _PLIVO_CHUNK_SIZE, frames_received,
                             )
                     except Exception:
                         logger.error(
-                            "Failed to send agent audio to Plivo (chunk #%d), stopping bridge",
-                            chunks_sent,
+                            "[%s] Failed to send audio to Plivo (chunk #%d)",
+                            identity, chunks_sent,
                         )
                         self._running = False
                         return
 
             # Flush remaining buffer
-            if self._mulaw_out_buffer and self._running:
+            if local_mulaw_buf and self._running:
                 try:
                     await self._plivo_send({
                         "event": "playAudio",
@@ -391,35 +523,48 @@ class PlivoLiveKitBridge:
                         "media": {
                             "contentType": "audio/x-mulaw",
                             "sampleRate": 8000,
-                            "payload": base64.b64encode(bytes(self._mulaw_out_buffer)).decode("ascii"),
+                            "payload": base64.b64encode(bytes(local_mulaw_buf)).decode("ascii"),
                         },
                     })
                     chunks_sent += 1
                 except Exception:
                     pass
-                self._mulaw_out_buffer.clear()
 
         except asyncio.CancelledError:
             pass
         except (ConnectionError, OSError) as exc:
-            logger.warning("Agent audio forwarding lost connection: %s", exc)
+            logger.warning("[%s] Audio forwarding lost connection: %s", identity, exc)
         except Exception:
-            logger.exception("Unexpected error forwarding agent audio to Plivo")
+            logger.exception("[%s] Unexpected error forwarding audio to Plivo", identity)
         finally:
+            self._outbound_active = False
+            self._bargein_paused = False
             logger.info(
-                "Agent audio forwarding ended: %d chunks sent, %d frames received, %d empty (conv=%s)",
-                chunks_sent, frames_received, empty_frames, self.conversation_id,
+                "[%s] Audio forwarding ended: %d chunks sent, %d frames received, %d empty (conv=%s)",
+                identity, chunks_sent, frames_received, empty_frames, self.conversation_id,
             )
 
     # ------------------------------------------------------------------
     # Interruption support: clear agent audio when caller speaks
     # ------------------------------------------------------------------
 
-    async def clear_agent_audio(self) -> None:
-        """Send clearAudio to Plivo to stop any queued agent audio.
+    async def _handle_bargein(self, source: str) -> None:
+        """Debounced barge-in handler. Pauses outbound audio and sends clearAudio.
 
-        Called when the caller interrupts (barge-in detected by the agent's VAD).
+        Called from two places:
+          - Bridge-level: feed_audio() detects high caller RMS during agent speech
+          - Agent-level: data channel {"type": "barge_in"} from LiveKit agent
+
+        Debounces: ignores duplicate triggers within _BARGEIN_DEBOUNCE_SEC.
         """
+        now = time.monotonic()
+        if now - self._last_bargein_time < _BARGEIN_DEBOUNCE_SEC:
+            return  # already handled recently
+        self._last_bargein_time = now
+
+        # Immediately pause outbound audio (forwarding loop checks this flag)
+        self._bargein_paused = True
+
         if not self._stream_sid or not self._running:
             return
         try:
@@ -427,10 +572,18 @@ class PlivoLiveKitBridge:
                 "event": "clearAudio",
                 "streamId": self._stream_sid,
             })
-            self._mulaw_out_buffer.clear()
-            logger.info("Cleared agent audio on Plivo (interruption): conv=%s", self.conversation_id)
+            logger.info("Barge-in [%s]: cleared Plivo audio (conv=%s)", source, self.conversation_id)
         except Exception:
             logger.warning("Failed to send clearAudio to Plivo", exc_info=True)
+
+        # Resume forwarding after a short pause — the agent will have stopped
+        # its TTS by now and new audio (if any) should flow through.
+        await asyncio.sleep(0.15)
+        self._bargein_paused = False
+
+    async def clear_agent_audio(self) -> None:
+        """Public API for external callers (handoff, supervisor barge)."""
+        await self._handle_bargein("external")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -443,16 +596,18 @@ class PlivoLiveKitBridge:
     async def stop(self) -> None:
         """Leave the LiveKit room and clean up."""
         self._running = False
-        if self._subscribe_task and not self._subscribe_task.done():
-            self._subscribe_task.cancel()
-            try:
-                await self._subscribe_task
-            except asyncio.CancelledError:
-                pass
+        # Cancel all participant forwarding tasks
+        for identity, task in self._subscribe_tasks.items():
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._subscribe_tasks.clear()
         if self._room:
             await self._room.disconnect()
             self._room = None
         self._audio_source = None
         self._pcm_buffer.clear()
-        self._mulaw_out_buffer.clear()
         logger.info("PlivoLiveKitBridge stopped: room=%s", self.room_name)

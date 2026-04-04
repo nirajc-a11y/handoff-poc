@@ -5,10 +5,16 @@ Every state change in a conversation flows through ``HandoffEngine.process_trigg
 It validates the transition against the state machine, executes the appropriate
 side effects (routing, provider calls, context building), persists the change,
 and publishes events for downstream consumers.
+
+When ``settings.use_livekit_agent`` is True, handoff side-effects send LiveKit
+data channel messages instead of redirecting Plivo calls. The Plivo-LiveKit
+bridge stays connected throughout the entire call lifecycle.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -319,6 +325,13 @@ class HandoffEngine:
         # Flush so routing queries can see the updated conversation
         await db.flush()
 
+        # Signal the AI agent to disconnect (LiveKit path)
+        await self._send_room_data(conversation.id, {
+            "type": "handoff",
+            "reason": metadata.get("reason", "escalation"),
+            "conversation_id": str(conversation.id),
+        })
+
         # Attempt immediate agent assignment
         agent_id = await self._routing_engine.find_available_agent(
             db,
@@ -390,6 +403,13 @@ class HandoffEngine:
             db, agent_id=agent_id, tenant_id=conversation.tenant_id,
         )
 
+        # Notify the LiveKit room that a human agent has been assigned
+        await self._send_room_data(conversation.id, {
+            "type": "agent_assigned",
+            "agent_id": str(agent_id),
+            "conversation_id": str(conversation.id),
+        })
+
     async def _handle_transfer(
         self,
         db: AsyncSession,
@@ -421,12 +441,25 @@ class HandoffEngine:
         if transfer_type == "warm":
             conversation.sub_state = "transfer_pending"
             # Warm: originating agent stays connected — don't clear handler.
+            # Signal room so target agent can join alongside originating agent
+            await self._send_room_data(conversation.id, {
+                "type": "transfer_pending",
+                "transfer_type": "warm",
+                "target_agent_id": str(target_agent_id) if target_agent_id else None,
+            })
         else:
             # Cold: originating agent disconnects immediately.
             prev_agent_id = conversation.current_handler_id
             conversation.sub_state = "transfer_pending"
             conversation.current_handler_type = "system"
             conversation.current_handler_id = None
+
+            # Signal the current agent to disconnect from the room
+            await self._send_room_data(conversation.id, {
+                "type": "transfer_disconnect",
+                "transfer_type": "cold",
+                "target_agent_id": str(target_agent_id) if target_agent_id else None,
+            })
 
             # Release the originating agent's slot
             if prev_agent_id is not None:
@@ -482,27 +515,32 @@ class HandoffEngine:
         conversation: Conversation,
         metadata: dict,
     ) -> None:
-        """Place the call on hold via the channel provider."""
+        """Place the call on hold via the channel provider or LiveKit data channel."""
         conversation.sub_state = "on_hold"
 
-        # Attempt to instruct the telephony provider to play hold music
         if conversation.channel == "voice":
-            try:
-                provider = await self._provider_registry.get_telephony(
-                    conversation.tenant_id, db,
-                )
-                session_id = self._get_provider_session_id(conversation)
-                if provider and session_id:
-                    hold_music_url = metadata.get("hold_music_url")
-                    await provider.hold_call(session_id, hold_music_url=hold_music_url)
-            except Exception:
-                logger.exception(
-                    "Failed to place call on hold via provider "
-                    "(conversation=%s, state=%s, tenant=%s)",
-                    conversation.id,
-                    conversation.state,
-                    conversation.tenant_id,
-                )
+            from app.config import settings
+            if settings.use_livekit_agent and settings.livekit_url:
+                # LiveKit path: signal the bridge to stop forwarding agent audio
+                await self._send_room_data(conversation.id, {"type": "hold"})
+            else:
+                # Legacy path: instruct the telephony provider to play hold music
+                try:
+                    provider = await self._provider_registry.get_telephony(
+                        conversation.tenant_id, db,
+                    )
+                    session_id = self._get_provider_session_id(conversation)
+                    if provider and session_id:
+                        hold_music_url = metadata.get("hold_music_url")
+                        await provider.hold_call(session_id, hold_music_url=hold_music_url)
+                except Exception:
+                    logger.exception(
+                        "Failed to place call on hold via provider "
+                        "(conversation=%s, state=%s, tenant=%s)",
+                        conversation.id,
+                        conversation.state,
+                        conversation.tenant_id,
+                    )
 
     async def _handle_unhold(
         self,
@@ -510,25 +548,31 @@ class HandoffEngine:
         conversation: Conversation,
         metadata: dict,
     ) -> None:
-        """Resume the call from hold via the channel provider."""
+        """Resume the call from hold via the channel provider or LiveKit data channel."""
         conversation.sub_state = None
 
         if conversation.channel == "voice":
-            try:
-                provider = await self._provider_registry.get_telephony(
-                    conversation.tenant_id, db,
-                )
-                session_id = self._get_provider_session_id(conversation)
-                if provider and session_id:
-                    await provider.unhold_call(session_id)
-            except Exception:
-                logger.exception(
-                    "Failed to unhold call via provider "
-                    "(conversation=%s, state=%s, tenant=%s)",
-                    conversation.id,
-                    conversation.state,
-                    conversation.tenant_id,
-                )
+            from app.config import settings
+            if settings.use_livekit_agent and settings.livekit_url:
+                # LiveKit path: signal the bridge to resume forwarding
+                await self._send_room_data(conversation.id, {"type": "unhold"})
+            else:
+                # Legacy path
+                try:
+                    provider = await self._provider_registry.get_telephony(
+                        conversation.tenant_id, db,
+                    )
+                    session_id = self._get_provider_session_id(conversation)
+                    if provider and session_id:
+                        await provider.unhold_call(session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to unhold call via provider "
+                        "(conversation=%s, state=%s, tenant=%s)",
+                        conversation.id,
+                        conversation.state,
+                        conversation.tenant_id,
+                    )
 
     async def _handle_wrap_up(
         self,
@@ -629,6 +673,56 @@ class HandoffEngine:
 
         conversation.current_handler_type = "system"
         conversation.current_handler_id = None
+
+    # ------------------------------------------------------------------
+    # LiveKit room data messaging
+    # ------------------------------------------------------------------
+
+    async def _send_room_data(
+        self,
+        conversation_id: UUID,
+        data: dict,
+    ) -> None:
+        """Send a data message to the LiveKit room for this conversation.
+
+        Used to signal handoff/hold/transfer to the bridge and agent
+        without redirecting the Plivo call. Non-fatal on failure.
+        """
+        from app.config import settings
+        if not settings.use_livekit_agent or not settings.livekit_url:
+            return
+
+        room_name = f"room-{conversation_id}"
+        try:
+            from livekit import api as lk_api
+            from livekit.protocol.models import DataPacket
+            lk = lk_api.LiveKitAPI(
+                url=settings.livekit_url,
+                api_key=settings.livekit_api_key,
+                api_secret=settings.livekit_api_secret,
+            )
+            try:
+                await asyncio.wait_for(
+                    lk.room.send_data(
+                        lk_api.SendDataRequest(
+                            room=room_name,
+                            data=json.dumps(data).encode(),
+                            kind=DataPacket.RELIABLE,
+                            topic="bridge-control",
+                        )
+                    ),
+                    timeout=3.0,
+                )
+                logger.info(
+                    "Sent room data to %s: %s", room_name, data.get("type", "unknown"),
+                )
+            finally:
+                await lk.aclose()
+        except Exception:
+            logger.warning(
+                "Failed to send room data to %s (non-fatal): %s",
+                room_name, data, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Persistence helpers

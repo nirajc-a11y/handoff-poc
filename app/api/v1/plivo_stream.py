@@ -39,7 +39,14 @@ router = APIRouter(prefix="/plivo", tags=["plivo-stream"])
 
 
 async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
-    """Trigger AI->Human escalation by redirecting the live Plivo call."""
+    """Trigger AI->Human escalation.
+
+    When LiveKit is enabled, the handoff engine sends a data channel message
+    to the LiveKit room — the bridge stays connected and the AI agent disconnects
+    gracefully. No Plivo call redirect needed.
+
+    Legacy path: redirects the Plivo call to the escalation XML endpoint.
+    """
     conv_uuid = _uuid.UUID(conv_id)
 
     try:
@@ -55,6 +62,13 @@ async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
         logger.exception("Failed to transition state for escalation: conv=%s", conv_id)
         return
 
+    # LiveKit path: handoff engine already sent data channel message
+    # to the room — no Plivo redirect needed. Bridge stays connected.
+    if settings.use_livekit_agent and settings.livekit_url:
+        logger.info("LiveKit escalation: bridge stays connected, AI agent will disconnect (conv=%s)", conv_id)
+        return
+
+    # Legacy path: redirect the Plivo call to conference
     try:
         result = await db.execute(
             select(ChannelSession.provider_session_id)
@@ -431,8 +445,9 @@ async def _handle_livekit_bridge(
     handles STT -> LLM -> TTS. This function just shuttles audio
     between Plivo and LiveKit.
     """
-    # Fetch tenant name for room metadata
+    # Fetch tenant name and custom AI prompt for room metadata
     company_name = "Demo Corp"
+    ai_system_prompt: str | None = None
     if tenant_id:
         try:
             async with async_session_factory() as db:
@@ -441,6 +456,8 @@ async def _handle_livekit_bridge(
                 )).scalar_one_or_none()
                 if tenant:
                     company_name = tenant.name
+                    if tenant.config:
+                        ai_system_prompt = tenant.config.get("ai_system_prompt")
         except Exception:
             logger.warning("Failed to fetch tenant %s for LiveKit bridge", tenant_id)
 
@@ -449,6 +466,7 @@ async def _handle_livekit_bridge(
         tenant_id=tenant_id,
         language=language,
         company_name=company_name,
+        ai_system_prompt=ai_system_prompt,
         plivo_ws_send=ws.send_json,
     )
 

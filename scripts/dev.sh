@@ -130,8 +130,9 @@ info "Backend is ready."
 # ── 7. LiveKit Agent worker ─────────────────────────────────
 USE_LK=$(grep -E "^USE_LIVEKIT_AGENT=" .env 2>/dev/null | sed 's/^USE_LIVEKIT_AGENT=//' | tr -d '"' | tr -d "'" | tr '[:upper:]' '[:lower:]')
 if [ "$USE_LK" = "true" ]; then
-  info "Starting LiveKit agent worker..."
-  python -m app.voice_ai.livekit_agent dev &
+  info "Starting LiveKit agent worker (logs → logs/livekit-agent.log)..."
+  mkdir -p logs
+  python -m app.voice_ai.livekit_agent dev 2>&1 | tee logs/livekit-agent.log &
   PIDS+=($!)
   info "LiveKit agent worker started."
 else

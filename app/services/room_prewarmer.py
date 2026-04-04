@@ -29,6 +29,7 @@ class PrewarmedRoom:
     language: str
     company_name: str
     created_at: float
+    ai_system_prompt: str | None = None
 
 
 class RoomPrewarmer:
@@ -47,6 +48,7 @@ class RoomPrewarmer:
         tenant_id: str,
         language: str,
         company_name: str,
+        ai_system_prompt: str | None = None,
     ) -> Optional[PrewarmedRoom]:
         """Create room + dispatch agent. Called as background task during IVR.
 
@@ -64,12 +66,15 @@ class RoomPrewarmer:
                 return self._rooms[conversation_id]
 
             room_name = f"room-{conversation_id}"
-            metadata = json.dumps({
+            room_meta = {
                 "tenant_id": tenant_id,
                 "conversation_id": conversation_id,
                 "language": language,
                 "company_name": company_name,
-            })
+            }
+            if ai_system_prompt:
+                room_meta["ai_system_prompt"] = ai_system_prompt
+            metadata = json.dumps(room_meta)
 
             room_api = lk_api.LiveKitAPI(
                 url=settings.livekit_url,
@@ -83,10 +88,10 @@ class RoomPrewarmer:
                             name=room_name,
                             metadata=metadata,
                             empty_timeout=60,  # auto-delete if nobody joins within 60s
-                            max_participants=3,  # bridge + agent + optional supervisor
+                            max_participants=5,  # bridge + AI agent + human agent + supervisor + buffer
                         )
                     ),
-                    timeout=5.0,
+                    timeout=10.0,
                 )
 
                 prewarmed = PrewarmedRoom(
@@ -96,6 +101,7 @@ class RoomPrewarmer:
                     language=language,
                     company_name=company_name,
                     created_at=asyncio.get_event_loop().time(),
+                    ai_system_prompt=ai_system_prompt,
                 )
                 self._rooms[conversation_id] = prewarmed
                 logger.info(

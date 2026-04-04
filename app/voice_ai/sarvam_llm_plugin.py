@@ -17,6 +17,21 @@ from app.core.ai_engine import ai_engine, SYSTEM_PROMPTS
 logger = logging.getLogger(__name__)
 
 
+# Phone conversation rules — always appended to any system prompt
+# to keep LLM responses short and conversational for voice calls.
+_PHONE_RULES = """
+
+CRITICAL RULES FOR PHONE CONVERSATIONS:
+- Keep responses SHORT — 1 to 2 sentences maximum. The customer is on a phone call.
+- Be conversational and natural, like a real person. Don't sound scripted.
+- Ask one question at a time. Don't overwhelm with multiple questions.
+- Use simple, clear language. Avoid jargon.
+- NEVER use bullet points, lists, markdown, or formatting — this is spoken audio.
+- If the customer seems frustrated, acknowledge their feelings first.
+- If you cannot resolve the issue within 3 exchanges, offer to connect them to a human agent.
+- Never make up information. If unsure, say you'll check and connect them to a specialist."""
+
+
 class SarvamLLM(llm.LLM):
     """LiveKit-compatible LLM plugin backed by AIEngine (Groq/Sarvam)."""
 
@@ -30,7 +45,10 @@ class SarvamLLM(llm.LLM):
         super().__init__()
         self._language = language
         self._company_name = company_name
-        self._system_prompt = system_prompt or SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
+        # Use tenant's custom prompt or fall back to default, but always
+        # append phone conversation rules to keep responses voice-friendly.
+        base = system_prompt or SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
+        self._system_prompt = base + _PHONE_RULES
         self._history: list[dict] = []
         self._should_escalate = False
         self._should_end_call = False

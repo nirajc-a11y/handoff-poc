@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -51,10 +52,10 @@ _PLIVO_LANG = {"en": "en-IN", "hi": "hi-IN", "mr": "hi-IN"}
 
 
 def _speak(text: str, language: str = "en") -> str:
-    """Generate a <Speak> tag with Indian English voice."""
+    """Generate a <Speak> tag with AWS Polly voice via Plivo (no AWS creds needed)."""
     lang_code = _PLIVO_LANG.get(language, "en-IN")
     escaped = _escape_xml(text)
-    return f'<Speak voice="WOMAN" language="{lang_code}">{escaped}</Speak>'
+    return f'<Speak voice="Polly.Aditi" language="{lang_code}">{escaped}</Speak>'
 
 
 def xml_response(xml: str) -> Response:
@@ -286,6 +287,7 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
         speak_prompt = _speak(prompt)
         speak_goodbye = _speak("We did not receive any input. Goodbye.")
         xml = f"""<Response>
+    <Wait length="1"/>
     <GetDigits action="{action_url}" method="POST" timeout="10" numDigits="1" retries="2">
         {speak_prompt}
     </GetDigits>
@@ -307,12 +309,13 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
             _tconfig = (tenant_row.config if tenant_row else None) or {}
             _default_lang = _tconfig.get("default_language", "en")
             _speaker = _tconfig.get("sarvam_speaker", "ritu")
+            _ai_prompt = _tconfig.get("ai_system_prompt")
 
             async def _prewarm_pipeline():
                 from app.services.room_prewarmer import room_prewarmer
                 from app.services.greeting_cache import warm_greeting_cache
                 await asyncio.gather(
-                    room_prewarmer.prewarm(conv_id, tenant_id, _default_lang, _company),
+                    room_prewarmer.prewarm(conv_id, tenant_id, _default_lang, _company, _ai_prompt),
                     warm_greeting_cache(tenant_id, _default_lang, _company, _speaker),
                     return_exceptions=True,
                 )
@@ -526,7 +529,12 @@ async def _handle_human_queue(
     conv_id: str,
     action: IVRAction,
 ) -> Response:
-    """Transition to human queue and return hold-music XML."""
+    """Transition to human queue and return appropriate XML.
+
+    LiveKit path: return Stream XML (same as AI path) — the bridge handles
+    audio routing and the human agent joins the LiveKit room.
+    Legacy path: return Conference XML with hold music.
+    """
     try:
         await handoff_engine.process_trigger(
             db=db,
@@ -542,7 +550,21 @@ async def _handle_human_queue(
     except StateMachineError as exc:
         logger.warning("Human queue state transition failed: %s", exc)
 
-    # Put the customer into a conference room so an agent can join later
+    # LiveKit path: route through the audio stream bridge so the human agent
+    # can join the same LiveKit room. The bridge handles all audio routing.
+    if settings.use_livekit_agent and settings.livekit_url:
+        stream_url = _abs(
+            f"/api/v1/plivo/audio-stream?tenant_id={tenant_id}"
+            f"&conv_id={conv_id}&language=en&skip_greeting=true"
+        )
+        s = _speak("Please hold while we connect you to an agent.")
+        xml = f"""<Response>
+    {s}
+    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw" streamTimeout="1800" audioTrack="inbound">{stream_url}</Stream>
+</Response>"""
+        return xml_response(xml)
+
+    # Legacy path: put the customer into a Plivo conference room
     cb_url = _abs(f"/api/v1/plivo/conference-events?tenant_id={tenant_id}&amp;conv_id={conv_id}")
     wait_url = _abs("/api/v1/plivo/hold-music")
     s = _speak("Please hold while we connect you to an agent.")
@@ -849,11 +871,22 @@ async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
 
 @router.post("/escalate-to-human")
 async def plivo_escalate_to_human(request: Request, db: AsyncSession = Depends(get_db)):
-    """Escalate from AI to human agent — transition state and return hold music."""
+    """Escalate from AI to human agent — transition state and return hold music.
+
+    When LiveKit is enabled, this endpoint should not be reached (the bridge
+    stays connected and handoff happens via data channel). Returns empty
+    XML as a safety guard.
+    """
     from app.db.models.message import Message
 
     tenant_id = request.query_params.get("tenant_id", "")
     conv_id = request.query_params.get("conv_id", "")
+
+    # LiveKit path: bridge stays connected, no conference needed.
+    # This endpoint should not be called, but guard against it.
+    if settings.use_livekit_agent and settings.livekit_url:
+        logger.info("escalate-to-human called in LiveKit mode — returning empty XML (conv=%s)", conv_id)
+        return xml_response("<Response></Response>")
 
     if conv_id:
         try:
@@ -868,7 +901,7 @@ async def plivo_escalate_to_human(request: Request, db: AsyncSession = Depends(g
         except (StateMachineError, Exception) as exc:
             logger.warning("Escalation state transition failed: %s", exc)
 
-    # Return hold music while waiting for human agent
+    # Legacy path: return hold music while waiting for human agent
     cb_url = _abs(f"/api/v1/plivo/conference-events?tenant_id={tenant_id}&amp;conv_id={conv_id}")
     wait_url = _abs("/api/v1/plivo/hold-music")
     s = _speak("Please hold while we connect you to an agent.")
@@ -1040,19 +1073,40 @@ async def plivo_call_status(
         await db.commit()
         return {"status": "ok", "call_state": call_state.value, "trigger": None}
 
-    try:
-        conversation = await handoff_engine.process_trigger(
-            db=db,
-            conversation_id=session.conversation_id,
-            trigger=trigger,
-            metadata={
-                "provider": "plivo",
-                "provider_session_id": call_uuid,
-                "call_state": call_state.value,
-                "raw_status": status,
-            },
-        )
+    # Retry logic: Plivo can fire recording-status and call-status webhooks
+    # nearly simultaneously, causing row-level lock contention (NOWAIT).
+    max_retries = 3
+    conversation = None
+    for attempt in range(max_retries):
+        try:
+            conversation = await handoff_engine.process_trigger(
+                db=db,
+                conversation_id=session.conversation_id,
+                trigger=trigger,
+                metadata={
+                    "provider": "plivo",
+                    "provider_session_id": call_uuid,
+                    "call_state": call_state.value,
+                    "raw_status": status,
+                },
+            )
+            break
+        except OperationalError as lock_exc:
+            # Row locked by another concurrent webhook — retry after short delay
+            if attempt < max_retries - 1:
+                await db.rollback()
+                await asyncio.sleep(0.3 * (attempt + 1))
+                logger.info("Retrying call-status trigger (attempt %d, lock contention)", attempt + 2)
+            else:
+                logger.warning("Lock contention persisted after %d retries for conv %s", max_retries, session.conversation_id)
+                await db.commit()
+                return {"status": "retry_exhausted", "reason": "lock_contention"}
 
+    if conversation is None:
+        await db.commit()
+        return {"status": "ignored", "reason": "no_transition"}
+
+    try:
         # Auto-end: if call ended (hangup) and state is now wrap_up,
         # automatically submit disposition to move to "ended"
         if call_state == CallState.ENDED and conversation.state == "wrap_up":
