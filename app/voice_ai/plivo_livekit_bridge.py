@@ -111,6 +111,9 @@ class PlivoLiveKitBridge:
         # Hold state: pause audio forwarding to Plivo
         self._hold_active = False
 
+        # Overflow tracking for buffer overflow logging
+        self._overflow_count = 0
+
     @property
     def room_name(self) -> str:
         return f"room-{self.conversation_id}"
@@ -367,6 +370,12 @@ class PlivoLiveKitBridge:
         if len(self._pcm_buffer) > _PCM_BUFFER_MAX:
             overflow = len(self._pcm_buffer) - _PCM_BUFFER_MAX
             self._pcm_buffer = self._pcm_buffer[overflow:]
+            self._overflow_count += 1
+            if self._overflow_count % 100 == 1:  # log every 100th overflow
+                logger.warning(
+                    "PCM buffer overflow #%d: dropped %d bytes (conv=%s)",
+                    self._overflow_count, overflow, self.conversation_id,
+                )
 
         # Emit complete frames
         while len(self._pcm_buffer) >= _LK_FRAME_BYTES:
@@ -401,6 +410,8 @@ class PlivoLiveKitBridge:
         frames_received = 0
         empty_frames = 0
         local_mulaw_buf = bytearray()
+        _consecutive_send_failures = 0
+        _MAX_SEND_FAILURES = 3  # kill bridge after 3 consecutive failures
 
         logger.info(
             "Audio forwarding started for %s: conv=%s, stream_sid=%s",
@@ -466,18 +477,27 @@ class PlivoLiveKitBridge:
                             },
                         })
                         chunks_sent += 1
+                        _consecutive_send_failures = 0  # reset on success
                         if chunks_sent == 1:
                             logger.info(
                                 "[%s] First audio chunk sent to Plivo (%d bytes, after %d frames)",
                                 identity, _PLIVO_CHUNK_SIZE, frames_received,
                             )
                     except Exception:
-                        logger.error(
-                            "[%s] Failed to send audio to Plivo (chunk #%d)",
-                            identity, chunks_sent,
+                        _consecutive_send_failures += 1
+                        logger.warning(
+                            "[%s] Failed to send audio to Plivo (chunk #%d, failure %d/%d)",
+                            identity, chunks_sent, _consecutive_send_failures, _MAX_SEND_FAILURES,
                         )
-                        self._running = False
-                        return
+                        if _consecutive_send_failures >= _MAX_SEND_FAILURES:
+                            logger.error(
+                                "[%s] Too many consecutive send failures — stopping bridge",
+                                identity,
+                            )
+                            self._running = False
+                            return
+                        await asyncio.sleep(0.05)  # 50ms backoff
+                        continue
 
             # Flush remaining buffer
             if local_mulaw_buf and self._running:

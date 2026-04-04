@@ -45,7 +45,15 @@ async def close_client():
 # Greeting TTS cache — avoids re-synthesizing the same greeting text
 # ---------------------------------------------------------------------------
 
-_greeting_cache: dict[str, list[bytes]] = {}
+try:
+    from cachetools import TTLCache
+    _greeting_cache: TTLCache = TTLCache(maxsize=100, ttl=3600)  # 1 hour TTL, max 100 entries
+except ImportError:
+    _greeting_cache: dict = {}  # fallback to unbounded dict if cachetools not installed
+
+# TTS circuit breaker — fast-fail after consecutive failures
+_tts_failures: int = 0
+_TTS_CIRCUIT_THRESHOLD: int = 3
 
 
 def get_cached_greeting(text: str, language: str, speaker: str) -> list[bytes] | None:
@@ -155,38 +163,48 @@ async def synthesize(
     Returns:
         Audio bytes (WAV format)
     """
+    global _tts_failures
+    if _tts_failures >= _TTS_CIRCUIT_THRESHOLD:
+        raise RuntimeError(f"TTS circuit breaker open ({_tts_failures} consecutive failures)")
+
     if not settings.sarvam_api_key:
         raise ValueError("SARVAM_API_KEY is not configured. Cannot call Sarvam TTS.")
 
     lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
     speaker = V2_TO_V3_SPEAKER.get(speaker, speaker)
 
-    client = _get_client()
-    resp = await client.post(
-        f"{SARVAM_BASE}/text-to-speech",
-        headers={
-            "api-subscription-key": settings.sarvam_api_key,
-            "Content-Type": "application/json",
-        },
-        json={
-            "text": text,
-            "target_language_code": lang_code,
-            "speaker": speaker,
-            "model": "bulbul:v3",
-            "temperature": temperature,
-            "pace": pace,
-        },
-    )
-    if resp.status_code >= 400:
-        logger.error("Sarvam TTS error %d: %s", resp.status_code, resp.text[:500])
-    resp.raise_for_status()
-    result = resp.json()
-    audio_b64 = result.get("audios", [None])[0]
-    if not audio_b64:
-        raise ValueError(f"No audio in Sarvam TTS response: {list(result.keys())}")
-    audio_data = base64.b64decode(audio_b64)
-    logger.info("Sarvam TTS (%s, %s): %d bytes", lang_code, speaker, len(audio_data))
-    return audio_data
+    try:
+        client = _get_client()
+        resp = await client.post(
+            f"{SARVAM_BASE}/text-to-speech",
+            headers={
+                "api-subscription-key": settings.sarvam_api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "target_language_code": lang_code,
+                "speaker": speaker,
+                "model": "bulbul:v3",
+                "temperature": temperature,
+                "pace": pace,
+            },
+        )
+        if resp.status_code >= 400:
+            logger.error("Sarvam TTS error %d: %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+        result = resp.json()
+        audio_b64 = result.get("audios", [None])[0]
+        if not audio_b64:
+            raise ValueError(f"No audio in Sarvam TTS response: {list(result.keys())}")
+        audio_data = base64.b64decode(audio_b64)
+        logger.info("Sarvam TTS (%s, %s): %d bytes", lang_code, speaker, len(audio_data))
+        _tts_failures = 0  # reset on success
+        return audio_data
+    except Exception:
+        _tts_failures += 1
+        logger.error("TTS failed (%d consecutive failures)", _tts_failures)
+        raise
 
 
 async def synthesize_stream(
@@ -199,36 +217,46 @@ async def synthesize_stream(
     instead of waiting 5-9s for the full response. Output is raw 8kHz
     mulaw ready for Plivo playback (no WAV conversion needed).
     """
+    global _tts_failures
+    if _tts_failures >= _TTS_CIRCUIT_THRESHOLD:
+        raise RuntimeError(f"TTS circuit breaker open ({_tts_failures} consecutive failures)")
+
     if not settings.sarvam_api_key:
         raise ValueError("SARVAM_API_KEY is not configured. Cannot call Sarvam TTS.")
 
     lang_code = {"en": "en-IN", "mr": "mr-IN", "hi": "hi-IN"}.get(language, "en-IN")
     speaker = V2_TO_V3_SPEAKER.get(speaker, speaker)
 
-    client = _get_client()
-    async with client.stream(
-        "POST",
-        f"{SARVAM_BASE}/text-to-speech/stream",
-        headers={
-            "api-subscription-key": settings.sarvam_api_key,
-            "Content-Type": "application/json",
-        },
-        json={
-            "text": text,
-            "target_language_code": lang_code,
-            "speaker": speaker,
-            "model": "bulbul:v3",
-            "output_audio_codec": "mulaw",
-            "speech_sample_rate": 8000,
-            "pace": pace,
-        },
-    ) as resp:
-        if resp.status_code >= 400:
-            body = await resp.aread()
-            logger.error("Sarvam TTS stream error %d: %s", resp.status_code, body[:500])
-            resp.raise_for_status()
-        total = 0
-        async for chunk in resp.aiter_bytes(chunk_size=640):
-            total += len(chunk)
-            yield chunk
-        logger.info("Sarvam TTS stream (%s, %s): %d bytes total", lang_code, speaker, total)
+    try:
+        client = _get_client()
+        async with client.stream(
+            "POST",
+            f"{SARVAM_BASE}/text-to-speech/stream",
+            headers={
+                "api-subscription-key": settings.sarvam_api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "target_language_code": lang_code,
+                "speaker": speaker,
+                "model": "bulbul:v3",
+                "output_audio_codec": "mulaw",
+                "speech_sample_rate": 8000,
+                "pace": pace,
+            },
+        ) as resp:
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                logger.error("Sarvam TTS stream error %d: %s", resp.status_code, body[:500])
+                resp.raise_for_status()
+            total = 0
+            async for chunk in resp.aiter_bytes(chunk_size=640):
+                total += len(chunk)
+                yield chunk
+            logger.info("Sarvam TTS stream (%s, %s): %d bytes total", lang_code, speaker, total)
+            _tts_failures = 0  # reset on success
+    except Exception:
+        _tts_failures += 1
+        logger.error("TTS stream failed (%d consecutive failures)", _tts_failures)
+        raise
