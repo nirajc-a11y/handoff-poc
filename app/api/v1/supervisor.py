@@ -307,19 +307,22 @@ async def livekit_barge(conv_id: str):
     if not settings.livekit_url or not settings.use_livekit_agent:
         raise HTTPException(400, "LiveKit is not enabled")
 
-    # 1. State transition first — validate state before sending barge signal
+    # 1. State transition first — validate state before sending barge signal.
+    # AI_TRANSFER moves AI_HANDLING → QUEUED_FOR_HUMAN; this also signals the
+    # LiveKit agent to disconnect via _handle_queue_for_human's room data message.
+    # We deliberately skip AGENT_ASSIGNED since the supervisor joins the room
+    # directly with the token returned below — no routing engine lookup needed.
     async with async_session_factory() as db:
         conv_uuid = _uuid.UUID(conv_id)
-        for trigger in (Trigger.AI_TRANSFER, Trigger.AGENT_ASSIGNED):
-            try:
-                await handoff_engine.process_trigger(
-                    db=db,
-                    conversation_id=conv_uuid,
-                    trigger=trigger,
-                    metadata={"reason": "Supervisor barge-in via LiveKit", "handler": "supervisor"},
-                )
-            except StateMachineError:
-                logger.info("LiveKit barge: skipping %s for conv=%s", trigger.value, conv_id)
+        try:
+            await handoff_engine.process_trigger(
+                db=db,
+                conversation_id=conv_uuid,
+                trigger=Trigger.AI_TRANSFER,
+                metadata={"reason": "Supervisor barge-in via LiveKit"},
+            )
+        except StateMachineError:
+            logger.info("LiveKit barge: AI_TRANSFER skipped for conv=%s (state unchanged)", conv_id)
         await db.commit()
 
     # 2. Send barge signal via data message (only after state transition succeeds)

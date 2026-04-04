@@ -239,6 +239,30 @@ async def entrypoint(ctx: JobContext) -> None:
         allow_interruptions=True,
     )
 
+    # ---------------------------------------------------------------------------
+    # Transcript publishing via Redis pub/sub
+    # The main FastAPI process subscribes to "transcript.added" and persists
+    # Message records to the DB, then publishes "conversation.message_added".
+    # ---------------------------------------------------------------------------
+
+    async def _publish_transcript(sender_type: str, content: str) -> None:
+        if not conversation_id or not tenant_id or not content.strip():
+            return
+        try:
+            from app.core.redis import get_redis
+            r = get_redis()
+            await r.publish(
+                "transcript.added",
+                json.dumps({
+                    "conversation_id": conversation_id,
+                    "tenant_id": tenant_id,
+                    "sender_type": sender_type,
+                    "content": content.strip(),
+                }),
+            )
+        except Exception:
+            logger.warning("Failed to publish transcript to Redis", exc_info=True)
+
     # Handle data messages from supervisor / backend (whisper / barge / handoff)
     @ctx.room.on("data_received")
     def _on_data(packet: rtc.DataPacket) -> None:
@@ -275,6 +299,20 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
     logger.info("LiveKit agent started in room %s", ctx.room.name)
+
+    @session.on("user_input_transcribed")
+    def _on_user_transcript(ev) -> None:
+        if ev.is_final and ev.transcript.strip():
+            asyncio.create_task(_publish_transcript("customer", ev.transcript))
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item(ev) -> None:
+        item = ev.item
+        if getattr(item, "role", None) == "assistant":
+            text = getattr(item, "text_content", None)
+            # Skip interrupted items — text may be truncated mid-sentence
+            if text and not getattr(item, "interrupted", False):
+                asyncio.create_task(_publish_transcript("ai", text))
 
     @session.on("close")
     def _on_session_close(*_):

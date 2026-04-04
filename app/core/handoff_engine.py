@@ -600,26 +600,26 @@ class HandoffEngine:
         })
 
         # Hang up the actual phone call via the telephony provider.
-        # This may fail gracefully when called from the LiveKit agent subprocess
-        # (provider not registered there) — the Plivo stream disconnects naturally
-        # when the bridge WebSocket closes.
+        # In LiveKit mode the bridge WebSocket closure (triggered by the
+        # call_ended data message above) is sufficient — no provider API call needed.
         if conversation.channel == "voice":
-            try:
-                provider = await self._provider_registry.get_telephony(
-                    conversation.tenant_id, db,
-                )
-                session_id = self._get_provider_session_id(conversation)
-                if provider and session_id:
-                    await provider.end_call(session_id)
-            except (KeyError, Exception):
-                logger.warning(
-                    "Failed to hang up call via provider "
-                    "(conversation=%s, state=%s, tenant=%s) — "
-                    "call will disconnect via bridge WebSocket closure",
-                    conversation.id,
-                    conversation.state,
-                    conversation.tenant_id,
-                )
+            from app.config import settings as _cfg
+            if not (_cfg.use_livekit_agent and _cfg.livekit_url):
+                try:
+                    provider = await self._provider_registry.get_telephony(
+                        conversation.tenant_id, db,
+                    )
+                    session_id = self._get_provider_session_id(conversation)
+                    if provider and session_id:
+                        await provider.end_call(session_id)
+                except (KeyError, Exception):
+                    logger.warning(
+                        "Failed to hang up call via provider "
+                        "(conversation=%s, state=%s, tenant=%s)",
+                        conversation.id,
+                        conversation.state,
+                        conversation.tenant_id,
+                    )
 
         # Release the agent so they can take new conversations while filling
         # out the disposition form.

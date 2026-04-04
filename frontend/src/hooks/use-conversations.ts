@@ -17,6 +17,7 @@ export function useActiveConversations(limit = 50, offset = 0) {
     queryKey: ['conversations', tenantId, 'active', limit, offset],
     queryFn: () => api.get(`/conversations/active?limit=${limit}&offset=${offset}`),
     enabled: !!tenantId,
+    refetchInterval: 10_000, // Fallback poll — catches any missed WebSocket events
   })
 }
 

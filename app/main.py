@@ -104,6 +104,13 @@ async def lifespan(app: FastAPI):
 
         _room_cleanup_task = asyncio.create_task(_periodic_room_cleanup())
 
+    # Start transcript persistence handler (LiveKit agent publishes to Redis;
+    # this subscriber saves Message records and emits conversation.message_added)
+    _transcript_task = None
+    if settings.use_livekit_agent and settings.livekit_url:
+        from app.services.transcript_handler import run_transcript_handler
+        _transcript_task = asyncio.create_task(run_transcript_handler())
+
     # Start queue timeout monitor
     from app.services.queue_monitor import run_queue_monitor
     _queue_monitor_task = asyncio.create_task(run_queue_monitor())
@@ -114,6 +121,12 @@ async def lifespan(app: FastAPI):
         _room_cleanup_task.cancel()
         try:
             await _room_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    if _transcript_task and not _transcript_task.done():
+        _transcript_task.cancel()
+        try:
+            await _transcript_task
         except asyncio.CancelledError:
             pass
     if _queue_monitor_task and not _queue_monitor_task.done():

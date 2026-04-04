@@ -6,7 +6,8 @@ import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom } from '@/stores/ws'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
-import type { Message, QueueStats } from '@/lib/types'
+import type { Message, QueueStats, Conversation } from '@/lib/types'
+import type { PaginatedConversations } from '@/hooks/use-conversations'
 
 export function useWebSocket() {
   const [tenantId] = useAtom(tenantIdAtom)
@@ -51,7 +52,28 @@ export function useWebSocket() {
       }
 
       if (event.type.startsWith('conversation.') && event.type !== 'conversation.message_added') {
-        // State change, handoff, recording — invalidate conversation queries
+        // Optimistically update the state in cache so the UI reflects the
+        // transition immediately without waiting for the refetch round-trip.
+        if (event.type === 'conversation.state_changed' && event.data?.conversation_id) {
+          const convId = event.data.conversation_id as string
+          const toState = event.data.to_state as string | undefined
+          if (toState) {
+            qc.setQueryData<Conversation>(
+              ['conversations', 'detail', convId],
+              (old) => old ? { ...old, state: toState } : old,
+            )
+            qc.setQueryData<PaginatedConversations>(
+              ['conversations', tenantId, 'active', 50, 0],
+              (old) => old ? {
+                ...old,
+                items: old.items.map((c) =>
+                  c.id === convId ? { ...c, state: toState } : c,
+                ),
+              } : old,
+            )
+          }
+        }
+        // Always invalidate so the next background refetch gets fresh server data
         qc.invalidateQueries({ queryKey: ['conversations'] })
         if (event.data?.conversation_id) {
           qc.invalidateQueries({ queryKey: ['conversations', 'detail', event.data.conversation_id] })
