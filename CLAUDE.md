@@ -99,12 +99,31 @@ Latency budget: ~1.5-2.0s turn latency (down from ~4.5s). See `VOICE_AI_FINDINGS
 
 When `USE_LIVEKIT_AGENT=true`, the voice pipeline switches from the custom VoiceAISession to a LiveKit-based architecture:
 
-- **Plivo-LiveKit Bridge** (`app/voice_ai/plivo_livekit_bridge.py`): Receives mulaw audio from Plivo WebSocket, converts to PCM, publishes as a LiveKit audio track. Subscribes to the Agent's audio track and sends PCM→mulaw back to Plivo. Streams a TTS greeting immediately on connect (before the agent joins the room).
-- **LiveKit Agent Worker** (`app/voice_ai/livekit_agent.py`): Standalone worker process using LiveKit Agents SDK. Auto-joins rooms and runs the STT→LLM→TTS pipeline. Uses Deepgram STT, Silero VAD, SarvamLLM plugin, and Deepgram Aura TTS. Run separately: `python -m app.voice_ai.livekit_agent`.
-- **SarvamLLM Plugin** (`app/voice_ai/sarvam_llm_plugin.py`): LiveKit-compatible LLM plugin wrapping the existing AIEngine (Groq/Sarvam). Preserves conversation history, system prompts, escalation detection, and confidence scoring.
+- **Plivo-LiveKit Bridge** (`app/voice_ai/plivo_livekit_bridge.py`): Receives mulaw audio from Plivo WebSocket, converts to PCM, publishes as a LiveKit audio track. Subscribes to the Agent's audio track and sends PCM→mulaw back to Plivo. Streams a cached TTS greeting immediately on connect (before the agent joins the room).
+- **LiveKit Agent Worker** (`app/voice_ai/livekit_agent.py`): Standalone worker process using LiveKit Agents SDK. Auto-joins rooms and runs the STT→LLM→TTS pipeline. Uses **Deepgram STT (nova-3)**, **Silero VAD**, **Groq LLM** (direct, not via SarvamLLM plugin), and language-aware TTS (Deepgram Aura 2 for English, Sarvam Bulbul v3 for Marathi). Tool-based call control (`end_call`, `transfer_to_human` functions) replaces keyword matching. Run separately: `python -m app.voice_ai.livekit_agent`.
+- **SarvamLLM Plugin** (`app/voice_ai/sarvam_llm_plugin.py`): LiveKit-compatible LLM plugin wrapping AIEngine — kept for reference but agent now calls Groq directly.
 - **SarvamTTS Plugin** (`app/voice_ai/sarvam_tts_plugin.py`): LiveKit-compatible TTS plugin wrapping Sarvam Bulbul v3. Converts mulaw→PCM for LiveKit transport.
+- **Sample Reference** (`app/voice_ai/sample_file.py`): Example implementation for claim verification calls — useful as a template for new LiveKit agent use-cases.
 
 The feature flag is in `app/config.py` (`use_livekit_agent`). When disabled, the legacy VoiceAISession path is used unchanged.
+
+### Transcript Persistence (Redis pub/sub)
+
+LiveKit agent worker has no DB connection. Transcripts flow via Redis:
+
+1. `livekit_agent.py` publishes `{"type": "transcript", "sender_type": "ai|customer", "content": "..."}` to Redis channel `transcript.added`
+2. `app/services/transcript_handler.py` runs as a background task in the FastAPI main process, subscribed to `transcript.added`
+3. Handler saves `Message` records to DB, then publishes `conversation.message_added` event to the event bus
+4. Avoids the DB connection bottleneck that would occur if the worker process held async sessions
+
+### Room Pre-warming (`app/services/room_prewarmer.py`)
+
+Eliminates the ~2.74s LiveKit dispatch delay when AI handling begins:
+
+- During IVR navigation (typically 10-20s), a LiveKit room is pre-created for the conversation
+- When DTMF triggers AI dispatch, the room is already available — agent connects immediately
+- `room_prewarmer.py` manages a pool of pre-warmed rooms keyed by `conversation_id`
+- A periodic cleanup task in `app/main.py` lifespan reclaims stale rooms
 
 ### Supervisor Subsystem
 
@@ -128,8 +147,17 @@ All routes under `/api/v1/` via `app/api/v1/router.py`. 91+ endpoints. Swagger a
 ### Frontend
 React 19 + Vite + TailwindCSS v4. Path alias `@/` maps to `./src/`. Pages: live dashboard, agents, campaigns, analytics, IVR config, history, settings. Browser softphone (Plivo WebRTC) in right panel. Supervisor panel in conversation detail (Listen/Whisper/Barge controls). State via Jotai atoms (`src/stores/`), data fetching via TanStack React Query. Vite proxies `/api`, `/ws`, `/recordings` to backend at `:8000`.
 
+**Notable frontend additions:**
+
+- `src/components/error-boundary.tsx` + `src/stores/errors.ts` — top-level error boundary with error state atom
+- `src/components/layout/offline-indicator.tsx` — connectivity banner, shown when WebSocket drops
+- Skeleton loaders in `src/components/live/` for async conversation list + detail states
+- `src/hooks/use-websocket.ts` — WebSocket hook with automatic reconnection logic
+- `src/hooks/use-livekit-agent.ts` — LiveKit agent connection hook for supervisor panel
+- `src/hooks/use-supervisor.ts` — tries LiveKit endpoints first, falls back to legacy WebSocket
+
 ### Module-Level Singletons
-Core engines are instantiated as module-level singletons at the bottom of their files: `handoff_engine`, `event_bus`, `routing_engine`, `ai_engine`, `ivr_engine`, `context_builder`, `provider_registry`. These are imported directly (no DI container).
+Core engines are instantiated as module-level singletons at the bottom of their files: `handoff_engine`, `event_bus`, `routing_engine`, `ai_engine`, `ivr_engine`, `context_builder`, `provider_registry`, `room_prewarmer`. These are imported directly (no DI container).
 
 ## Key Patterns
 
@@ -142,9 +170,38 @@ Core engines are instantiated as module-level singletons at the bottom of their 
 
 ## Environment Variables
 
-Configured via `pydantic-settings` in `app/config.py` (reads `.env`). Key vars: `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, `GROQ_MODEL`, `PLIVO_AUTH_ID`/`AUTH_TOKEN`/`NUMBER`, `TWILIO_ACCOUNT_SID`/`AUTH_TOKEN`/`NUMBER`, `BASE_WEBHOOK_URL` (ngrok for webhooks), `LIVEKIT_URL`/`API_KEY`/`API_SECRET`/`USE_LIVEKIT_AGENT`, `SARVAM_API_KEY`, `DEEPGRAM_API_KEY`.
+Configured via `pydantic-settings` in `app/config.py` (reads `.env`). `app/config.py` runs `validate_on_startup()` in the FastAPI lifespan — fails fast on fatal misconfig (`DATABASE_URL`, `REDIS_URL`, LiveKit consistency) and logs warnings for missing optional providers.
+
+**Core:** `DATABASE_URL`, `REDIS_URL`
+
+**LLM:** `GROQ_API_KEY`, `GROQ_MODEL` (default: `meta-llama/llama-4-scout-17b-16e-instruct`)
+
+**Telephony:** `PLIVO_AUTH_ID`/`PLIVO_AUTH_TOKEN`/`PLIVO_NUMBER`, `TWILIO_ACCOUNT_SID`/`AUTH_TOKEN`/`NUMBER`, `BASE_WEBHOOK_URL` (ngrok URL for provider callbacks)
+
+**LiveKit:** `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`, `USE_LIVEKIT_AGENT` (default: `false`)
+
+**Speech:** `SARVAM_API_KEY` (STT + Marathi TTS), `DEEPGRAM_API_KEY` (STT + English TTS)
+
+**Voice pipeline tuning (all have defaults):** `VAD_THRESHOLD`, `VAD_ENDPOINTING_PROFILE`, `DEEPGRAM_STT_MODEL`, `DEEPGRAM_TTS_MODEL`, `DEEPGRAM_ENDPOINTING_MS`, `SARVAM_TTS_SPEAKER`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `BARGEIN_MIN_DURATION`, `GREETING_CACHE_TIMEOUT`, `QUEUE_TIMEOUT_SECONDS`
+
+## Scripts
+
+| Script | Purpose |
+| ------ | ------- |
+| `scripts/dev.sh` | Start full stack (postgres + ngrok + backend + frontend) |
+| `scripts/seed.py` | Seed demo tenant, agents, IVR, campaign, leads |
+| `scripts/seed_vsynergize.py` | Seed VSynergize tenant for Plivo integration testing |
+| `scripts/demo.py` | Run all 6 handoff scenarios (mock, no provider needed) |
+| `scripts/setup_twilio.py` | Configure Twilio webhooks |
+| `scripts/setup_plivo.py` | Create Plivo app + endpoints |
+| `scripts/setup_plivo_vsynergize.py` | Configure VSynergize Plivo endpoints |
+| `scripts/setup_inbound.py` | Setup inbound phone number |
+| `scripts/update_webhooks.py` | Sync Plivo webhook URLs from `BASE_WEBHOOK_URL` |
+| `scripts/verify_number.py` | Verify Plivo caller IDs |
+| `scripts/docker-entrypoint.sh` | Docker entrypoint (runs Alembic migrations then starts server) |
 
 ## Deployment
 
-- Backend: Docker (`Dockerfile` at root) with `docker-compose.yaml` for PostgreSQL + Redis + LiveKit + app
+- Backend: Docker (`Dockerfile` at root) with `docker-compose.yaml` for PostgreSQL + Redis + LiveKit + app. `scripts/docker-entrypoint.sh` runs `alembic upgrade head` before starting uvicorn.
+- Railway: `Dockerfile.railway` + `railway.toml` for Railway.app deployment
 - For real phone calls: ngrok + webhook configuration via `scripts/setup_twilio.py` or `scripts/setup_plivo.py`

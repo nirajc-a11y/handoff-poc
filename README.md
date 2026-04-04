@@ -6,8 +6,10 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 
 - **6 Handoff Scenarios** — IVR->AI, AI->Human, Human->Human transfer, IVR skip, WhatsApp escalation, Email threading
 - **Real Phone Calls** — Twilio and Plivo integration with pluggable provider architecture
-- **AI Agent** — Groq-powered (Llama 3) conversational AI with streaming LLM + streaming TTS (~1.5s turn latency)
-- **LiveKit Agent Mode** — Feature-flagged alternative voice pipeline using LiveKit Agents SDK with Deepgram STT, Silero VAD, and Sarvam LLM/TTS plugins
+- **AI Agent** — Groq-powered (Llama 4 Scout) conversational AI with streaming LLM + streaming TTS (~1.5s turn latency)
+- **LiveKit Agent Mode** — Feature-flagged voice pipeline using LiveKit Agents SDK with Deepgram STT (nova-3), Silero VAD, Groq LLM, and language-aware TTS (Deepgram Aura 2 for English, Sarvam Bulbul v3 for Marathi)
+- **Transcript Persistence** — LiveKit agent publishes transcripts to Redis; background handler persists to DB and fans out to WebSocket clients
+- **Room Pre-warming** — LiveKit rooms created during IVR navigation, eliminating ~2.74s dispatch delay when AI handling begins
 - **Barge-In** — Caller can interrupt AI mid-sentence; system detects speech, stops TTS, processes new input
 - **Echo Suppression** — Playback wait + echo guard prevents phantom transcript pickup
 - **Supervisor Panel** — Live Listen, Whisper, Barge via WebSocket (legacy) or LiveKit rooms (when LiveKit mode enabled)
@@ -21,7 +23,7 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 
 ## Architecture
 
-```
+```text
                     ┌──────────────────────────────────┐
                     │     Live Operations Dashboard     │
                     │  (WebSocket + Plivo Softphone)    │
@@ -51,6 +53,7 @@ Multi-tenant telecom handoff orchestration engine. Demonstrates real-time IVR / 
 ## Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
 - Docker (for PostgreSQL, Redis, and optionally LiveKit)
 - Node.js 18+ and pnpm (for frontend)
@@ -69,6 +72,7 @@ bash scripts/dev.sh
 ```
 
 This single command:
+
 1. Starts PostgreSQL, Redis, and LiveKit via Docker Compose
 2. Starts ngrok (auto-detects static domain from `.env`)
 3. Updates `BASE_WEBHOOK_URL` in `.env` with the ngrok URL
@@ -174,7 +178,7 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 ## Handoff Scenarios
 
 | # | Scenario | Flow | Channel |
-|---|----------|------|---------|
+| - | -------- | ---- | ------- |
 | 1 | Inbound + AI escalation | Call → IVR → AI → confidence drops → Human | Voice |
 | 2 | IVR skip to human | Call → IVR → Press 0 → Human queue → Agent assigned | Voice |
 | 3 | Human-to-human transfer | Agent A → warm/cold transfer → Agent B | Voice |
@@ -184,7 +188,7 @@ DEEPGRAM_API_KEY=your-deepgram-api-key
 
 ## State Machine
 
-```
+```text
 INITIATED → RINGING → IVR → AI_HANDLING → QUEUED_FOR_HUMAN → HUMAN_HANDLING → WRAP_UP → ENDED
                         │         │                                │
                         │         └→ QUEUED (confidence drop)      ├→ ON_HOLD
@@ -202,7 +206,7 @@ When a customer calls, they hear:
 > डेमो कॉर्प मध्ये आपले स्वागत आहे. मराठीसाठी 2 दाबा."
 
 - **Press 1** → English menu → English AI agent
-- **Press 2** → Marathi menu → Marathi AI agent (via Groq Llama 3)
+- **Press 2** → Marathi menu → Marathi AI agent (via Groq Llama 4 Scout)
 
 Language selection flows through the entire conversation — IVR prompts, AI responses, and escalation keywords are all language-aware.
 
@@ -227,12 +231,12 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 
 ## API Documentation
 
-**Swagger UI**: http://localhost:8000/docs
+**Swagger UI**: <http://localhost:8000/docs>
 
 ### Key Endpoints
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+| -------- | ------ | ----------- |
 | `/api/v1/calls/outbound` | POST | Initiate outbound call |
 | `/api/v1/calls/inbound/webhook` | POST | Inbound call webhook |
 | `/api/v1/calls/{id}/answer` | POST | Answer/connect a call |
@@ -269,13 +273,13 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
+| ----- | ---------- |
 | Framework | FastAPI + Uvicorn |
 | Database | PostgreSQL + async SQLAlchemy + Alembic |
 | Cache/Pub-Sub | Redis 7 (event bus, cross-process pub/sub) |
-| AI | Groq SDK (Llama 3.3 70B) with streaming + mock fallback |
-| STT/TTS | Sarvam AI (Indian languages), Deepgram (streaming STT) |
-| Voice AI Agent | LiveKit Agents SDK (feature-flagged) with Silero VAD |
+| AI | Groq SDK (Llama 4 Scout) with streaming + mock fallback |
+| STT/TTS | Sarvam AI (Marathi), Deepgram nova-3 (English STT + Aura 2 TTS) |
+| Voice AI Agent | LiveKit Agents SDK (feature-flagged) with Deepgram STT, Silero VAD, Groq LLM |
 | Telephony | Twilio Voice + Plivo (pluggable) |
 | Browser Calling | Plivo Browser SDK (WebRTC) |
 | Real-time | Redis Pub/Sub → WebSocket (FastAPI native) |
@@ -286,7 +290,7 @@ Open `http://localhost:8000/static/index.html?tenant_id=<TENANT_ID>` for:
 
 ## Project Structure
 
-```
+```text
 handoff-poc/
 ├── app/
 │   ├── api/v1/                 # REST + WebSocket endpoints
@@ -327,13 +331,19 @@ handoff-poc/
 │   │   └── mock/               #   Mock providers for all channels
 │   ├── voice_ai/
 │   │   ├── voice_agent.py      #   VoiceAISession (barge-in, streaming, echo guard)
-│   │   ├── livekit_agent.py    #   LiveKit Agent worker (Deepgram STT, Silero VAD, Sarvam LLM/TTS)
+│   │   ├── livekit_agent.py    #   LiveKit Agent worker (Groq LLM, Deepgram STT, Silero VAD, lang-aware TTS)
 │   │   ├── plivo_livekit_bridge.py  # Plivo↔LiveKit audio bridge
-│   │   ├── sarvam_llm_plugin.py     # LiveKit LLM plugin wrapping AIEngine
-│   │   ├── sarvam_tts_plugin.py     # LiveKit TTS plugin wrapping Sarvam
+│   │   ├── sarvam_llm_plugin.py     # LiveKit LLM plugin (reference; agent now calls Groq directly)
+│   │   ├── sarvam_tts_plugin.py     # LiveKit TTS plugin wrapping Sarvam Bulbul v3
 │   │   ├── sarvam.py           #   Sarvam STT/TTS client (shared httpx pool)
-│   │   └── session_registry.py #   Active session tracking for supervisor
-│   ├── services/               #   Business logic layer (7 services)
+│   │   ├── deepgram_stt.py     #   Deepgram streaming STT client
+│   │   ├── vad.py              #   Silero VAD wrapper
+│   │   ├── session_registry.py #   Active session tracking for supervisor
+│   │   └── sample_file.py      #   Reference implementation for claim verification calls
+│   ├── services/               #   Business logic layer
+│   │   ├── transcript_handler.py    # Redis→DB transcript persistence for LiveKit agent
+│   │   ├── room_prewarmer.py        # LiveKit room pre-creation during IVR (eliminates dispatch delay)
+│   │   └── ...                      # conversation, call, handoff, agent, campaign services
 │   └── ws/                     #   WebSocket manager + Redis→WS broadcaster
 ├── scripts/
 │   ├── dev.sh                  #   Single command: start full stack (pg + ngrok + backend + frontend)
@@ -341,8 +351,12 @@ handoff-poc/
 │   ├── demo.py                 #   Run all 6 handoff scenarios
 │   ├── setup_twilio.py         #   Configure Twilio webhooks + verify numbers
 │   ├── setup_plivo.py          #   Create Plivo app + endpoints
+│   ├── setup_plivo_vsynergize.py #  Configure VSynergize Plivo endpoints
+│   ├── setup_inbound.py        #   Setup inbound phone number
+│   ├── seed_vsynergize.py      #   Seed VSynergize tenant for Plivo testing
 │   ├── update_webhooks.py      #   Update Plivo app webhook URLs from BASE_WEBHOOK_URL
-│   └── verify_number.py        #   Verify caller IDs
+│   ├── verify_number.py        #   Verify caller IDs
+│   └── docker-entrypoint.sh    #   Runs alembic upgrade head then starts server
 ├── static/
 │   └── index.html              #   Live operations dashboard + softphone
 ├── recordings/                 #   Call recordings (.wav files)
@@ -356,7 +370,7 @@ handoff-poc/
 14 tables, all tenant-scoped:
 
 | Table | Purpose |
-|-------|---------|
+| ----- | ------- |
 | `tenants` | Tenant config (provider settings, AI thresholds, language) |
 | `users` | Users with roles (agent, supervisor, admin) |
 | `agent_profiles` | Agent skills, team, max concurrent capacity |
@@ -396,6 +410,7 @@ Same pattern for WhatsApp, Email, and SMS providers.
 ## Cleanup
 
 To stop Twilio charges:
+
 1. Go to Twilio Console → Phone Numbers → Active Numbers
 2. Click your number → **Release this number**
 3. Trial credit stops being consumed
