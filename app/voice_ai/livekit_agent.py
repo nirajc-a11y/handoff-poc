@@ -87,12 +87,10 @@ async def entrypoint(ctx: JobContext) -> None:
         system_prompt=custom_system_prompt,
     )
 
-    # Sarvam Bulbul v3 TTS — Indian language support + pace control
-    from app.voice_ai.sarvam_tts_plugin import SarvamTTS
-    tts_plugin = SarvamTTS(
-        language=language,
-        speaker="ritu",
-        pace=1.15,
+    # Deepgram Aura TTS — fast, low-latency, same API key as STT
+    tts_plugin = deepgram.TTS(
+        api_key=_settings.deepgram_api_key,
+        model="aura-asteria-en",
     )
 
     # Deepgram nova-3 STT — tuned for telephony

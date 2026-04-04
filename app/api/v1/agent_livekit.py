@@ -3,11 +3,14 @@
 Generates LiveKit room access tokens so human agents can join
 a call's LiveKit room via the browser client. The bridge handles
 all audio conversion between LiveKit and Plivo.
+
+Rate limited: 1 token per agent per conversation per 10 seconds.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +25,10 @@ from app.dependencies import get_db, get_current_user_id, get_tenant_id
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent-livekit"])
+
+# Simple in-memory rate limiter: {(agent_id, conv_id): last_request_time}
+_token_rate_limit: dict[tuple[str, str], float] = {}
+_RATE_LIMIT_SECONDS = 10.0
 
 
 class LiveKitTokenResponse(BaseModel):
@@ -44,6 +51,19 @@ async def get_agent_livekit_token(
     """
     if not settings.use_livekit_agent or not settings.livekit_url:
         raise HTTPException(status_code=400, detail="LiveKit agent mode is not enabled")
+
+    # Rate limit: 1 token per agent per conversation per 10 seconds
+    rate_key = (str(agent_id), conv_id)
+    now = time.monotonic()
+    last = _token_rate_limit.get(rate_key, 0.0)
+    if now - last < _RATE_LIMIT_SECONDS:
+        raise HTTPException(status_code=429, detail="Token already issued recently, retry later")
+    _token_rate_limit[rate_key] = now
+
+    # Cleanup stale entries (older than 60s)
+    stale = [k for k, v in _token_rate_limit.items() if now - v > 60.0]
+    for k in stale:
+        _token_rate_limit.pop(k, None)
 
     # Verify the conversation exists and the agent is assigned
     conv_uuid = UUID(conv_id)

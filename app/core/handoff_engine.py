@@ -581,6 +581,12 @@ class HandoffEngine:
         metadata: dict,
     ) -> None:
         """Move conversation into wrap-up / disposition phase."""
+        # Signal LiveKit participants to disconnect (agent, bridge)
+        await self._send_room_data(conversation.id, {
+            "type": "call_ended",
+            "reason": metadata.get("reason", "wrap_up"),
+        })
+
         # Hang up the actual phone call via the telephony provider
         if conversation.channel == "voice":
             try:
@@ -682,47 +688,58 @@ class HandoffEngine:
         self,
         conversation_id: UUID,
         data: dict,
-    ) -> None:
+        retries: int = 2,
+    ) -> bool:
         """Send a data message to the LiveKit room for this conversation.
 
-        Used to signal handoff/hold/transfer to the bridge and agent
-        without redirecting the Plivo call. Non-fatal on failure.
+        Retries up to `retries` times with backoff. Returns True on success.
+        Critical signals (handoff, agent_assigned) should check the return value.
         """
         from app.config import settings
         if not settings.use_livekit_agent or not settings.livekit_url:
-            return
+            return True  # not applicable, consider success
 
         room_name = f"room-{conversation_id}"
-        try:
-            from livekit import api as lk_api
-            from livekit.protocol.models import DataPacket
-            lk = lk_api.LiveKitAPI(
-                url=settings.livekit_url,
-                api_key=settings.livekit_api_key,
-                api_secret=settings.livekit_api_secret,
-            )
+        msg_type = data.get("type", "unknown")
+
+        for attempt in range(1, retries + 2):  # 1-based, retries+1 total attempts
             try:
-                await asyncio.wait_for(
-                    lk.room.send_data(
-                        lk_api.SendDataRequest(
-                            room=room_name,
-                            data=json.dumps(data).encode(),
-                            kind=DataPacket.RELIABLE,
-                            topic="bridge-control",
-                        )
-                    ),
-                    timeout=3.0,
+                from livekit import api as lk_api
+                from livekit.protocol.models import DataPacket
+                lk = lk_api.LiveKitAPI(
+                    url=settings.livekit_url,
+                    api_key=settings.livekit_api_key,
+                    api_secret=settings.livekit_api_secret,
                 )
-                logger.info(
-                    "Sent room data to %s: %s", room_name, data.get("type", "unknown"),
-                )
-            finally:
-                await lk.aclose()
-        except Exception:
-            logger.warning(
-                "Failed to send room data to %s (non-fatal): %s",
-                room_name, data, exc_info=True,
-            )
+                try:
+                    await asyncio.wait_for(
+                        lk.room.send_data(
+                            lk_api.SendDataRequest(
+                                room=room_name,
+                                data=json.dumps(data).encode(),
+                                kind=DataPacket.RELIABLE,
+                                topic="bridge-control",
+                            )
+                        ),
+                        timeout=2.0,
+                    )
+                    logger.info("Sent room data to %s: %s", room_name, msg_type)
+                    return True
+                finally:
+                    await lk.aclose()
+            except Exception:
+                if attempt <= retries:
+                    logger.warning(
+                        "Room data send failed (attempt %d/%d, type=%s, room=%s), retrying...",
+                        attempt, retries + 1, msg_type, room_name,
+                    )
+                    await asyncio.sleep(0.3 * attempt)
+                else:
+                    logger.error(
+                        "Room data send FAILED after %d attempts (type=%s, room=%s)",
+                        retries + 1, msg_type, room_name, exc_info=True,
+                    )
+        return False
 
     # ------------------------------------------------------------------
     # Persistence helpers

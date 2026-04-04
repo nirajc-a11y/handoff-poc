@@ -506,4 +506,12 @@ async def _handle_livekit_bridge(
     except Exception:
         logger.exception("Error in LiveKit bridge: conv=%s", conv_id)
     finally:
-        await bridge.stop()
+        # Ensure bridge and WebSocket are fully cleaned up
+        try:
+            await bridge.stop()
+        except Exception:
+            logger.warning("Error stopping bridge for conv=%s", conv_id, exc_info=True)
+        try:
+            await ws.close()
+        except Exception:
+            pass  # WebSocket may already be closed

@@ -133,6 +133,26 @@ class AIEngine:
         self.sarvam_api_key: str = settings.sarvam_api_key
         self.sarvam_model: str = settings.sarvam_llm_model
 
+        # Shared Groq client — reuses TCP+TLS connections across calls
+        self._groq_client: AsyncGroq | None = None
+
+        # Circuit breaker: fail fast after consecutive API failures
+        self._groq_failures: int = 0
+        self._sarvam_failures: int = 0
+        self._circuit_breaker_threshold: int = 3  # open circuit after N consecutive failures
+
+    def _get_groq_client(self) -> "AsyncGroq":
+        """Lazy-init shared AsyncGroq client for connection reuse."""
+        if self._groq_client is None and _GROQ_AVAILABLE and self.groq_api_key:
+            self._groq_client = AsyncGroq(api_key=self.groq_api_key)
+        return self._groq_client
+
+    def _groq_circuit_open(self) -> bool:
+        return self._groq_failures >= self._circuit_breaker_threshold
+
+    def _sarvam_circuit_open(self) -> bool:
+        return self._sarvam_failures >= self._circuit_breaker_threshold
+
     # Regex to strip <think>...</think> blocks from reasoning models
     _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
@@ -173,7 +193,7 @@ class AIEngine:
                 logger.info("Audio too small (%d bytes), skipping transcription", len(audio_data))
                 return ""
 
-            groq_client = AsyncGroq(api_key=self.groq_api_key)
+            groq_client = self._get_groq_client()
             transcription = await groq_client.audio.transcriptions.create(
                 file=("recording.mp3", audio_data),
                 model="whisper-large-v3-turbo",
@@ -431,7 +451,7 @@ class AIEngine:
         message: str,
     ) -> tuple[str, float]:
         """Call the Groq chat completion API (fallback)."""
-        client = AsyncGroq(api_key=self.groq_api_key)
+        client = self._get_groq_client()
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history[-10:])
@@ -454,7 +474,7 @@ class AIEngine:
         message: str,
     ):
         """Stream Groq chat completion (fallback), yielding sentences."""
-        client = AsyncGroq(api_key=self.groq_api_key)
+        client = self._get_groq_client()
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history[-10:])
@@ -540,29 +560,41 @@ class AIEngine:
                 )
                 return
 
-        # Stream LLM: Groq primary (fast, no reasoning tags), Sarvam fallback
+        # Stream LLM: Groq primary (fast), Sarvam fallback, with circuit breaker
         if system_prompt is None:
             system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
 
-        if self.groq_api_key and _GROQ_AVAILABLE:
+        if self.groq_api_key and _GROQ_AVAILABLE and not self._groq_circuit_open():
             try:
                 async for sentence in self._call_groq_stream(
                     system_prompt, conversation_history, customer_message
                 ):
                     yield sentence, None
+                self._groq_failures = 0  # reset on success
                 return
             except Exception:
-                logger.exception("Groq streaming failed; trying Sarvam fallback")
+                self._groq_failures += 1
+                logger.exception(
+                    "Groq streaming failed (failures=%d/%d); trying Sarvam fallback",
+                    self._groq_failures, self._circuit_breaker_threshold,
+                )
+        elif self._groq_circuit_open():
+            logger.warning("Groq circuit breaker OPEN (%d failures), skipping", self._groq_failures)
 
-        if self.sarvam_api_key:
+        if self.sarvam_api_key and not self._sarvam_circuit_open():
             try:
                 async for sentence in self._call_sarvam_stream(
                     system_prompt, conversation_history, customer_message
                 ):
                     yield sentence, None
+                self._sarvam_failures = 0  # reset on success
                 return
             except Exception:
-                logger.exception("Sarvam LLM streaming also failed; using mock")
+                self._sarvam_failures += 1
+                logger.exception(
+                    "Sarvam LLM streaming failed (failures=%d/%d); using mock",
+                    self._sarvam_failures, self._circuit_breaker_threshold,
+                )
 
         turn_count = len(conversation_history) // 2
         resp = self._mock_response(customer_message, turn_count, language)

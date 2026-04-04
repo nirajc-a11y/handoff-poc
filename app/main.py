@@ -33,11 +33,9 @@ os.makedirs(_recordings_dir, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Validate voice pipeline config (fail fast on fatal misconfig)
+    # Validate all config (fail fast on fatal misconfig)
     try:
-        config_warnings = settings.validate_voice_pipeline()
-        for w in config_warnings:
-            logger.warning("Config: %s", w)
+        settings.validate_on_startup()
     except ValueError as exc:
         logger.error("FATAL config error: %s", exc)
         raise SystemExit(1) from exc

@@ -19,6 +19,7 @@ from app.api.v1.twilio import router as twilio_router
 from app.api.v1.webhooks import router as webhooks_router
 from app.api.v1.supervisor import router as supervisor_router
 from app.api.v1.agent_livekit import router as agent_livekit_router
+from app.api.v1.health import router as health_router
 from app.api.v1.ws import router as ws_router
 
 v1_router = APIRouter()
@@ -40,4 +41,5 @@ v1_router.include_router(twilio_router)
 v1_router.include_router(supervisor_router)
 v1_router.include_router(agent_livekit_router)
 v1_router.include_router(webhooks_router)
+v1_router.include_router(health_router)
 v1_router.include_router(ws_router)

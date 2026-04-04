@@ -32,7 +32,6 @@ import audioop
 import base64
 import json
 import logging
-import time
 from uuid import UUID
 
 from livekit import api as lk_api, rtc
@@ -68,12 +67,6 @@ _PLIVO_CHUNK_SIZE = 160  # 20ms at 8kHz mulaw — smaller for lower latency
 # Bounded buffer limits to prevent latency accumulation
 _PCM_BUFFER_MAX = 4800   # 100ms at 24kHz 16-bit mono
 _MULAW_BUFFER_MAX = 1600  # 200ms at 8kHz mulaw
-
-# Bridge-level barge-in: detect caller speech energy and instantly clear Plivo audio.
-# This fires BEFORE the LiveKit agent's data channel signal arrives (~20-50ms savings).
-_BARGEIN_RMS_THRESHOLD = 600   # caller RMS above this while agent is sending = barge-in
-_BARGEIN_FRAMES_REQUIRED = 2   # consecutive high-energy frames required (40ms at 20ms/frame)
-_BARGEIN_DEBOUNCE_SEC = 0.5    # ignore duplicate barge-in within this window
 
 
 class PlivoLiveKitBridge:
@@ -117,12 +110,6 @@ class PlivoLiveKitBridge:
 
         # Hold state: pause audio forwarding to Plivo
         self._hold_active = False
-
-        # Barge-in state
-        self._outbound_active = False     # True while forwarding non-silent agent audio
-        self._bargein_paused = False      # True = suppress outbound audio after barge-in
-        self._bargein_high_energy_count = 0
-        self._last_bargein_time = 0.0     # monotonic timestamp of last clearAudio
 
     @property
     def room_name(self) -> str:
@@ -246,7 +233,7 @@ class PlivoLiveKitBridge:
             msg_type = msg.get("type")
             if msg_type == "barge_in":
                 # Agent confirmed barge-in — clear audio (debounced)
-                asyncio.create_task(self._handle_bargein("agent-signal"))
+                asyncio.create_task(self.clear_agent_audio())
             elif msg_type == "hold":
                 self._hold_active = True
                 logger.info("Hold activated for conv=%s", self.conversation_id)
@@ -363,27 +350,14 @@ class PlivoLiveKitBridge:
         """Feed mulaw audio from Plivo into the LiveKit room.
 
         Converts mulaw 8kHz -> PCM 16-bit 24kHz and publishes as audio frames.
-
-        Also performs bridge-level barge-in detection: if the caller's audio
-        has high energy while the agent is actively sending audio, we instantly
-        send clearAudio to Plivo — no round-trip through LiveKit needed.
+        Barge-in is handled solely by the LiveKit agent's adaptive interruption
+        detector — no bridge-level VAD to avoid echo-triggered false positives.
         """
         if not self._running or not self._audio_source:
             return
 
         # mulaw -> PCM 16-bit at 8kHz
         pcm_8k = audioop.ulaw2lin(mulaw_bytes, 2)
-
-        # Bridge-level barge-in: detect caller speech during agent playback
-        if self._outbound_active and pcm_8k:
-            rms = audioop.rms(pcm_8k, 2)
-            if rms > _BARGEIN_RMS_THRESHOLD:
-                self._bargein_high_energy_count += 1
-                if self._bargein_high_energy_count >= _BARGEIN_FRAMES_REQUIRED:
-                    asyncio.create_task(self._handle_bargein("bridge-vad"))
-                    self._bargein_high_energy_count = 0
-            else:
-                self._bargein_high_energy_count = 0
 
         # Upsample 8kHz -> 24kHz
         pcm_24k, _ = audioop.ratecv(pcm_8k, 2, 1, _PLIVO_SAMPLE_RATE, _LK_SAMPLE_RATE, None)
@@ -459,15 +433,6 @@ class PlivoLiveKitBridge:
 
                 if not pcm_data:
                     empty_frames += 1
-                    self._outbound_active = False
-                    continue
-
-                # Track outbound activity for bridge-level barge-in detection
-                rms = audioop.rms(pcm_data, 2)
-                self._outbound_active = rms > 50
-
-                # Skip sending while barge-in pause is active
-                if self._bargein_paused:
                     continue
 
                 # Convert PCM 16-bit 8kHz -> mulaw 8kHz
@@ -537,8 +502,6 @@ class PlivoLiveKitBridge:
         except Exception:
             logger.exception("[%s] Unexpected error forwarding audio to Plivo", identity)
         finally:
-            self._outbound_active = False
-            self._bargein_paused = False
             logger.info(
                 "[%s] Audio forwarding ended: %d chunks sent, %d frames received, %d empty (conv=%s)",
                 identity, chunks_sent, frames_received, empty_frames, self.conversation_id,
@@ -548,23 +511,13 @@ class PlivoLiveKitBridge:
     # Interruption support: clear agent audio when caller speaks
     # ------------------------------------------------------------------
 
-    async def _handle_bargein(self, source: str) -> None:
-        """Debounced barge-in handler. Pauses outbound audio and sends clearAudio.
+    async def clear_agent_audio(self) -> None:
+        """Send clearAudio to Plivo to stop any queued agent audio.
 
-        Called from two places:
-          - Bridge-level: feed_audio() detects high caller RMS during agent speech
-          - Agent-level: data channel {"type": "barge_in"} from LiveKit agent
-
-        Debounces: ignores duplicate triggers within _BARGEIN_DEBOUNCE_SEC.
+        Called when:
+          - Agent data channel signal {"type": "barge_in"} (adaptive interruption)
+          - Handoff or supervisor barge
         """
-        now = time.monotonic()
-        if now - self._last_bargein_time < _BARGEIN_DEBOUNCE_SEC:
-            return  # already handled recently
-        self._last_bargein_time = now
-
-        # Immediately pause outbound audio (forwarding loop checks this flag)
-        self._bargein_paused = True
-
         if not self._stream_sid or not self._running:
             return
         try:
@@ -572,18 +525,9 @@ class PlivoLiveKitBridge:
                 "event": "clearAudio",
                 "streamId": self._stream_sid,
             })
-            logger.info("Barge-in [%s]: cleared Plivo audio (conv=%s)", source, self.conversation_id)
+            logger.info("Cleared Plivo audio (barge-in): conv=%s", self.conversation_id)
         except Exception:
             logger.warning("Failed to send clearAudio to Plivo", exc_info=True)
-
-        # Resume forwarding after a short pause — the agent will have stopped
-        # its TTS by now and new audio (if any) should flow through.
-        await asyncio.sleep(0.15)
-        self._bargein_paused = False
-
-    async def clear_agent_audio(self) -> None:
-        """Public API for external callers (handoff, supervisor barge)."""
-        await self._handle_bargein("external")
 
     # ------------------------------------------------------------------
     # Lifecycle

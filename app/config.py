@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Deepgram (streaming STT)
     deepgram_api_key: str = ""
 
+    # ElevenLabs (TTS — high quality, low latency)
+    elevenlabs_api_key: str = ""
+
     # Voice Activity Detection (Silero VAD)
     vad_threshold: float = 0.5
     vad_endpointing_profile: str = "ai_conversation"
@@ -58,18 +61,39 @@ class Settings(BaseSettings):
             if not self.livekit_api_key or not self.livekit_api_secret:
                 raise ValueError("use_livekit_agent=True but LIVEKIT_API_KEY/SECRET missing")
             if not self.deepgram_api_key:
-                raise ValueError("LiveKit agent requires DEEPGRAM_API_KEY for STT/TTS")
+                raise ValueError("LiveKit agent requires DEEPGRAM_API_KEY for STT")
+            if not self.sarvam_api_key:
+                raise ValueError("LiveKit agent requires SARVAM_API_KEY for TTS")
 
         if not self.sarvam_api_key and not self.groq_api_key:
             warnings.append("No LLM provider configured (SARVAM_API_KEY, GROQ_API_KEY)")
-
-        if not self.sarvam_api_key:
-            warnings.append("SARVAM_API_KEY missing — TTS will not work")
 
         if not self.plivo_auth_id and not self.twilio_account_sid:
             warnings.append("No telephony provider configured (Plivo or Twilio)")
 
         return warnings
+
+    def validate_on_startup(self) -> None:
+        """Called during FastAPI lifespan — raises on critical misconfig."""
+        import logging
+        _log = logging.getLogger(__name__)
+
+        # Fatal checks
+        warnings = self.validate_voice_pipeline()
+        for w in warnings:
+            _log.warning("CONFIG: %s", w)
+
+        if not self.database_url:
+            raise ValueError("DATABASE_URL is required")
+
+        if not self.redis_url:
+            raise ValueError("REDIS_URL is required")
+
+        if self.use_livekit_agent:
+            if not self.groq_api_key:
+                _log.warning("CONFIG: GROQ_API_KEY missing — LLM will fall back to Sarvam or mock")
+            if not self.base_webhook_url or "localhost" in self.base_webhook_url:
+                _log.warning("CONFIG: BASE_WEBHOOK_URL is localhost — Plivo webhooks won't work")
 
 
 settings = Settings()

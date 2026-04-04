@@ -92,8 +92,8 @@ export function useLivekitAgent(): LiveKitAgentState & LiveKitAgentActions {
       room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
         try {
           const msg = JSON.parse(new TextDecoder().decode(payload))
-          if (msg.type === 'transfer_disconnect') {
-            // Backend wants us to leave (cold transfer)
+          if (msg.type === 'transfer_disconnect' || msg.type === 'call_ended') {
+            // Backend wants us to leave (cold transfer or call ended)
             room.disconnect()
           } else if (msg.type === 'hold') {
             setState(prev => ({ ...prev, isOnHold: true }))

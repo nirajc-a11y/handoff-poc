@@ -287,7 +287,6 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
         speak_prompt = _speak(prompt)
         speak_goodbye = _speak("We did not receive any input. Goodbye.")
         xml = f"""<Response>
-    <Wait length="1"/>
     <GetDigits action="{action_url}" method="POST" timeout="10" numDigits="1" retries="2">
         {speak_prompt}
     </GetDigits>
