@@ -1090,6 +1090,15 @@ async def plivo_call_status(
                 },
             )
             break
+        except StateMachineError:
+            # Conversation already transitioned (e.g. agent ended call before
+            # Plivo's hangup webhook arrived) — not an error.
+            logger.info(
+                "Ignoring %s for conv %s (already in terminal state)",
+                trigger.value, session.conversation_id,
+            )
+            await db.commit()
+            return {"status": "already_ended", "conversation_id": str(session.conversation_id)}
         except OperationalError as lock_exc:
             # Row locked by another concurrent webhook — retry after short delay
             if attempt < max_retries - 1:

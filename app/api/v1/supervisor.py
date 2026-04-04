@@ -21,10 +21,9 @@ from livekit.protocol import models as lk_models
 from app.config import settings
 from app.core.handoff_engine import handoff_engine
 from app.schemas import SupervisorModeEnum
-from app.core.state_machine import ConversationState, StateMachineError, Trigger
+from app.core.state_machine import StateMachineError, Trigger
 from app.db.engine import async_session_factory
 from app.db.models.channel_session import ChannelSession
-from app.db.models.conversation import Conversation
 from app.voice_ai import session_registry
 
 logger = logging.getLogger(__name__)
@@ -126,20 +125,6 @@ async def supervisor_barge(conv_id: str):
         raise HTTPException(404, "No active session for this conversation")
 
     session = handle.session
-
-    # 0. Verify conversation is in AI_HANDLING state
-    # NOTE: TOCTOU — state may change between this check and the transitions below,
-    # but process_trigger() will raise StateMachineError if so (caught below).
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(Conversation.state).where(Conversation.id == _uuid.UUID(conv_id))
-        )
-        current_state = result.scalar_one_or_none()
-        if current_state != ConversationState.AI_HANDLING.value:
-            raise HTTPException(
-                409,
-                f"Barge requires AI_HANDLING state, but conversation is in '{current_state}'"
-            )
 
     # 1. Cancel AI pipeline
     session._barge_in_event.set()
@@ -313,16 +298,31 @@ async def livekit_whisper(conv_id: str, body: WhisperRequest):
 
 @router.post("/livekit-barge/{conv_id}")
 async def livekit_barge(conv_id: str):
-    """Supervisor barge via LiveKit: mute the AI agent, transition state.
+    """Supervisor barge via LiveKit: transition state, then mute the AI agent.
 
-    1. Send barge data message to mute the agent
-    2. Transition state to HUMAN_HANDLING
+    1. Transition state to HUMAN_HANDLING (validates current state under row lock)
+    2. Send barge data message to mute the agent (only if state transition succeeded)
     3. Return room token with publish permissions so supervisor can speak
     """
     if not settings.livekit_url or not settings.use_livekit_agent:
         raise HTTPException(400, "LiveKit is not enabled")
 
-    # 1. Send barge signal via data message
+    # 1. State transition first — validate state before sending barge signal
+    async with async_session_factory() as db:
+        conv_uuid = _uuid.UUID(conv_id)
+        for trigger in (Trigger.AI_TRANSFER, Trigger.AGENT_ASSIGNED):
+            try:
+                await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conv_uuid,
+                    trigger=trigger,
+                    metadata={"reason": "Supervisor barge-in via LiveKit", "handler": "supervisor"},
+                )
+            except StateMachineError:
+                logger.info("LiveKit barge: skipping %s for conv=%s", trigger.value, conv_id)
+        await db.commit()
+
+    # 2. Send barge signal via data message (only after state transition succeeds)
     room_api = lk_api.LiveKitAPI(
         url=settings.livekit_url,
         api_key=settings.livekit_api_key,
@@ -338,21 +338,6 @@ async def livekit_barge(conv_id: str):
         )
     finally:
         await room_api.aclose()
-
-    # 2. State transition
-    async with async_session_factory() as db:
-        conv_uuid = _uuid.UUID(conv_id)
-        for trigger in (Trigger.AI_TRANSFER, Trigger.AGENT_ASSIGNED):
-            try:
-                await handoff_engine.process_trigger(
-                    db=db,
-                    conversation_id=conv_uuid,
-                    trigger=trigger,
-                    metadata={"reason": "Supervisor barge-in via LiveKit", "handler": "supervisor"},
-                )
-            except StateMachineError:
-                logger.info("LiveKit barge: skipping %s for conv=%s", trigger.value, conv_id)
-        await db.commit()
 
     # 3. Return a publish-enabled token
     token = lk_api.AccessToken(

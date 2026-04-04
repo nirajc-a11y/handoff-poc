@@ -24,6 +24,10 @@ from app.services.message_service import message_service
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+_ALLOWED_AUDIO_EXTENSIONS = {"webm", "ogg", "wav", "mp3", "m4a"}
+_ALLOWED_CONTENT_TYPES = {"audio/webm", "audio/ogg", "audio/wav", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a"}
+
 
 # ---------------------------------------------------------------------------
 # Request schemas
@@ -107,15 +111,24 @@ async def list_conversations(
 
 @router.get("/active")
 async def list_active_conversations(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-) -> list[dict]:
-    """List all active (non-ended, non-failed) conversations."""
-    conversations = await conversation_service.get_active_conversations(
+) -> dict:
+    """List active (non-ended, non-failed) conversations with pagination."""
+    conversations, total = await conversation_service.get_active_conversations(
         db=db,
         tenant_id=tenant_id,
+        limit=limit,
+        offset=offset,
     )
-    return [_conversation_response(c) for c in conversations]
+    return {
+        "items": [_conversation_response(c) for c in conversations],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/{conversation_id}")
@@ -194,13 +207,27 @@ async def upload_audio_message(
     recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "recordings")
     os.makedirs(recordings_dir, exist_ok=True)
 
-    from datetime import datetime, timezone
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    ext = file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "webm"
-    filename = f"{conversation_id}_agent_{timestamp}.{ext}"
+    # Validate content type
+    if file.content_type and file.content_type not in _ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported audio format: {file.content_type}")
+
+    # Sanitize extension
+    ext = "webm"
+    if file.filename and "." in file.filename:
+        raw_ext = file.filename.rsplit(".", 1)[-1].lower()
+        if raw_ext in _ALLOWED_AUDIO_EXTENSIONS:
+            ext = raw_ext
+
+    # Read with size limit
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max {_MAX_UPLOAD_BYTES // (1024*1024)} MB)")
+
+    # Generate safe filename
+    import uuid as _uuid
+    filename = f"{_uuid.uuid4()}.{ext}"
     filepath = os.path.join(recordings_dir, filename)
 
-    content = await file.read()
     with open(filepath, "wb") as f:
         f.write(content)
 

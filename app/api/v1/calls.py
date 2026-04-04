@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.handoff_engine import ConversationNotFoundError, handoff_engine
+from app.core.ivr_engine import ivr_engine
 from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.models.lead import Lead
 from app.db.models.user import AgentProfile
@@ -19,6 +20,7 @@ from app.dependencies import get_current_user_id, get_db, get_tenant_id
 from app.schemas import ConversationResponse, PhoneNumber
 from app.services.call_service import call_service
 from app.services.campaign_service import campaign_service
+from app.services.conversation_service import conversation_service
 
 router = APIRouter(prefix="/calls", tags=["calls"])
 
@@ -364,19 +366,95 @@ async def dtmf_input(
 ) -> dict:
     """Handle a DTMF tone during IVR.
 
-    By convention, digit '0' routes to a human agent; all other digits route
-    to the AI handler.  Real IVR menu logic can override this in the
-    IVR engine's side-effect handler.
+    Looks up the IVR menu configuration from the conversation context and
+    delegates to ``ivr_engine.process_dtmf`` for proper routing.  Falls back
+    to the legacy heuristic (digit ``"0"`` → human, else → AI) when no IVR
+    menu is configured.
     """
-    trigger = Trigger.DTMF_HUMAN if body.digit == "0" else Trigger.DTMF_AI
-
     try:
+        # Load the conversation to check for an active IVR menu
+        conv = await conversation_service.get_conversation(
+            db, tenant_id, conversation_id,
+        )
+        if conv is None:
+            raise ConversationNotFoundError(conversation_id)
+
+        ivr_menu_id = (conv.context or {}).get("ivr_menu_id")
+
+        if ivr_menu_id is not None:
+            # ---- IVR-menu-driven routing ----
+            action = await ivr_engine.process_dtmf(
+                db, tenant_id, ivr_menu_id, body.digit,
+            )
+
+            if action.action_type == "ai_handoff":
+                conversation = await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conversation_id,
+                    trigger=Trigger.DTMF_AI,
+                    metadata={
+                        "digit": body.digit,
+                        "target_config": action.target_config,
+                    },
+                )
+                return _conversation_response(conversation)
+
+            if action.action_type == "human_queue":
+                conversation = await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conversation_id,
+                    trigger=Trigger.DTMF_HUMAN,
+                    metadata={
+                        "digit": body.digit,
+                        "target_config": action.target_config,
+                    },
+                )
+                return _conversation_response(conversation)
+
+            if action.action_type == "submenu":
+                # Navigate to the submenu — update context, return new prompt
+                conv.context = {
+                    **(conv.context or {}),
+                    "ivr_menu_id": str(action.target_id),
+                }
+                db.add(conv)
+                await db.commit()
+                await db.refresh(conv)
+
+                prompt, _ = await ivr_engine.get_menu_prompt(
+                    db, tenant_id, action.target_id,
+                )
+                return {
+                    "status": "submenu",
+                    "prompt": prompt,
+                    "conversation_id": str(conversation_id),
+                }
+
+            if action.action_type == "play_message":
+                return {
+                    "status": "play_message",
+                    "message": action.message,
+                    "conversation_id": str(conversation_id),
+                }
+
+            if action.action_type == "hangup":
+                conversation = await handoff_engine.process_trigger(
+                    db=db,
+                    conversation_id=conversation_id,
+                    trigger=Trigger.CUSTOMER_DISCONNECT,
+                    metadata={"digit": body.digit},
+                )
+                return _conversation_response(conversation)
+
+        # ---- Legacy fallback: no IVR menu configured ----
+        trigger = Trigger.DTMF_HUMAN if body.digit == "0" else Trigger.DTMF_AI
         conversation = await handoff_engine.process_trigger(
             db=db,
             conversation_id=conversation_id,
             trigger=trigger,
             metadata={"digit": body.digit},
         )
+
     except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except StateMachineError as exc:
