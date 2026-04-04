@@ -30,6 +30,7 @@ class PrewarmedRoom:
     company_name: str
     created_at: float
     ai_system_prompt: str | None = None
+    groq_model: str | None = None
 
 
 class RoomPrewarmer:
@@ -49,6 +50,7 @@ class RoomPrewarmer:
         language: str,
         company_name: str,
         ai_system_prompt: str | None = None,
+        groq_model: str | None = None,
     ) -> Optional[PrewarmedRoom]:
         """Create room + dispatch agent. Called as background task during IVR.
 
@@ -74,6 +76,8 @@ class RoomPrewarmer:
             }
             if ai_system_prompt:
                 room_meta["ai_system_prompt"] = ai_system_prompt
+            if groq_model:
+                room_meta["groq_model"] = groq_model
             metadata = json.dumps(room_meta)
 
             room_api = lk_api.LiveKitAPI(
@@ -102,6 +106,7 @@ class RoomPrewarmer:
                     company_name=company_name,
                     created_at=asyncio.get_event_loop().time(),
                     ai_system_prompt=ai_system_prompt,
+                    groq_model=groq_model,
                 )
                 self._rooms[conversation_id] = prewarmed
                 logger.info(

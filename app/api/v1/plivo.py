@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.handoff_engine import handoff_engine
+from app.core.handoff_engine import ConversationLockedError, handoff_engine
 from app.core.ivr_engine import IVRAction, ivr_engine
 from app.core.state_machine import ConversationState, StateMachineError, Trigger
 from app.db.models.channel_session import ChannelSession
@@ -1099,7 +1099,7 @@ async def plivo_call_status(
             )
             await db.commit()
             return {"status": "already_ended", "conversation_id": str(session.conversation_id)}
-        except OperationalError as lock_exc:
+        except (ConversationLockedError, OperationalError) as lock_exc:
             # Row locked by another concurrent webhook — retry after short delay
             if attempt < max_retries - 1:
                 await db.rollback()

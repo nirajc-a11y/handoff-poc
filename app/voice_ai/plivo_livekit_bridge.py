@@ -32,6 +32,7 @@ import audioop
 import base64
 import json
 import logging
+import time
 from uuid import UUID
 
 from livekit import api as lk_api, rtc
@@ -110,6 +111,10 @@ class PlivoLiveKitBridge:
 
         # Hold state: pause audio forwarding to Plivo
         self._hold_active = False
+
+        # Barge-in debounce: skip clearAudio if fired within this window
+        self._last_barge_in_time: float = 0.0
+        self._barge_in_debounce_s: float = 0.3
 
         # Overflow tracking for buffer overflow logging
         self._overflow_count = 0
@@ -235,7 +240,10 @@ class PlivoLiveKitBridge:
 
             msg_type = msg.get("type")
             if msg_type == "barge_in":
-                # Agent confirmed barge-in — clear audio (debounced)
+                now = time.monotonic()
+                if now - self._last_barge_in_time < self._barge_in_debounce_s:
+                    return  # skip duplicate barge-in within debounce window
+                self._last_barge_in_time = now
                 asyncio.create_task(self.clear_agent_audio())
             elif msg_type == "hold":
                 self._hold_active = True

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -599,7 +599,10 @@ class HandoffEngine:
             "reason": metadata.get("reason", "wrap_up"),
         })
 
-        # Hang up the actual phone call via the telephony provider
+        # Hang up the actual phone call via the telephony provider.
+        # This may fail gracefully when called from the LiveKit agent subprocess
+        # (provider not registered there) — the Plivo stream disconnects naturally
+        # when the bridge WebSocket closes.
         if conversation.channel == "voice":
             try:
                 provider = await self._provider_registry.get_telephony(
@@ -608,10 +611,11 @@ class HandoffEngine:
                 session_id = self._get_provider_session_id(conversation)
                 if provider and session_id:
                     await provider.end_call(session_id)
-            except Exception:
-                logger.exception(
+            except (KeyError, Exception):
+                logger.warning(
                     "Failed to hang up call via provider "
-                    "(conversation=%s, state=%s, tenant=%s)",
+                    "(conversation=%s, state=%s, tenant=%s) — "
+                    "call will disconnect via bridge WebSocket closure",
                     conversation.id,
                     conversation.state,
                     conversation.tenant_id,
@@ -775,9 +779,12 @@ class HandoffEngine:
         )
         try:
             result = await db.execute(stmt)
-        except OperationalError as exc:
+        except (OperationalError, DBAPIError) as exc:
             # PostgreSQL error code 55P03 = lock_not_available
-            if hasattr(exc.orig, "pgcode") and exc.orig.pgcode == "55P03":
+            # asyncpg wraps this as DBAPIError (not OperationalError)
+            orig = getattr(exc, "orig", None)
+            pgcode = getattr(orig, "pgcode", None)
+            if pgcode == "55P03" or "LockNotAvailableError" in str(exc):
                 raise ConversationLockedError(conversation_id) from exc
             raise
         conversation = result.scalar_one_or_none()

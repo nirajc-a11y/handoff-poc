@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/handoff_poc"
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # Sarvam LLM (Sarvam 30B — multilingual, optimized for Indian languages)
     sarvam_llm_model: str = "sarvam-m"
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 
     # Voice pipeline tuning
     deepgram_stt_model: str = "nova-3"
-    deepgram_tts_model: str = "aura-asteria-en"
+    deepgram_tts_model: str = "aura-2-athena-en"
     deepgram_endpointing_ms: int = 300
     sarvam_tts_speaker: str = "ritu"
     llm_timeout_seconds: float = 12.0

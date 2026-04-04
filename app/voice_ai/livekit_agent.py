@@ -1,14 +1,16 @@
 """LiveKit Voice AI Agent — replaces the custom VoiceAISession.
 
 Uses LiveKit's Agent + AgentSession with:
-  - STT: Deepgram (streaming, via livekit-plugins-deepgram)
+  - STT: Deepgram nova-3 (streaming, via livekit-plugins-deepgram)
   - VAD: Silero (built-in, via livekit-plugins-silero)
-  - LLM: Groq via openai.LLM (OpenAI-compatible endpoint)
+  - LLM: Groq via openai.LLM (llama-4-scout, fast tool calling)
   - TTS: Deepgram Aura (English) / Sarvam Bulbul v3 (Hindi/Marathi)
 
 Barge-in: When the agent detects caller speech during TTS (via VAD),
 it publishes a {"type": "barge_in"} data message so the Plivo bridge
 can send clearAudio to stop queued audio on the caller's end.
+
+End-call and escalation are handled via LLM function tools, not keyword matching.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import warnings
 # Suppress pydantic "model_" namespace warnings from livekit-agents internals
 warnings.filterwarnings("ignore", message=".*Field.*model_.*protected namespace.*")
 
-from livekit import rtc
+from livekit import api, rtc
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -30,9 +32,11 @@ from livekit.agents import (
     InterruptionOptions,
     JobContext,
     JobProcess,
+    RunContext,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
+    function_tool,
 )
 from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins import deepgram, openai, silero
@@ -43,69 +47,59 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Escalation / end-call keyword detection
-# ---------------------------------------------------------------------------
-_ESCALATION_PHRASES = {
-    "transfer you", "connect you with", "connect you to",
-    "let me get a human", "speak to a human", "human agent",
-    "transferring you", "connecting you",
-}
-_ESCALATION_PHRASES_MR = {
-    "तुम्हाला जोडतो", "एजंटशी जोडतो", "माणसाशी बोलू",
-}
-
-_END_CALL_PHRASES = {
-    "goodbye", "good bye", "have a great day", "have a nice day",
-    "thank you for calling", "thanks for calling", "take care",
-}
-_END_CALL_PHRASES_MR = {
-    "धन्यवाद", "बाय", "शुभ दिवस",
-}
-
-_USER_ESCALATION_KEYWORDS = {
-    "agent", "human", "representative", "operator", "real person",
-    "speak to someone", "help", "manager",
-}
-_USER_ESCALATION_KEYWORDS_MR = {
-    "एजंट", "माणूस", "मदत", "कोणाशी बोलायचं", "तक्रार", "व्यवस्थापक",
-}
-
-
-# ---------------------------------------------------------------------------
-# System prompts
+# System prompts — natural, identity-aware, optimized for spoken audio
 # ---------------------------------------------------------------------------
 _SYSTEM_PROMPTS: dict[str, str] = {
     "en": (
-        "You are Maya, a professional customer support agent for {company_name}. "
-        "Be warm, natural, and brief.\n\n"
-        "RULES:\n"
-        "- Max 1 short sentence per turn. Then STOP and WAIT for the customer to respond.\n"
-        "- Be conversational and natural, like a real person. Don't sound scripted.\n"
-        "- Ask one question at a time. Don't overwhelm with multiple questions.\n"
-        "- Use simple, clear language. Avoid jargon.\n"
-        "- NEVER use bullet points, lists, markdown, or formatting — this is spoken audio.\n"
+        "You are Maya, a friendly and professional customer support representative for {company_name}. "
+        "You are on a live phone call right now. This is not a simulation.\n\n"
+        "IDENTITY (NEVER BREAK):\n"
+        "- You ARE on a real phone call. NEVER say you \"can't make calls\" or \"can't interact with the outside world.\"\n"
+        "- NEVER break character or refer to yourself as an AI, language model, or assistant.\n"
+        "- If you get interrupted mid-sentence, briefly say \"Sorry, go ahead?\" and wait for them to speak, then continue your point. Do NOT restart your entire message.\n"
+        "- If the other person asks to end the call, says \"hang up\", or wants to stop, use the end_call tool immediately.\n\n"
+        "VOICE & TONE:\n"
+        "- Speak naturally, use contractions (I'm, we've, that's).\n"
+        "- Keep responses short — 1 sentence max per turn, then wait.\n"
+        "- Use filler words sparingly but naturally: \"Great\", \"Got it\", \"Sure thing\".\n"
+        "- Never narrate your actions or say \"I'm going to wait.\"\n\n"
+        "CRITICAL RULES:\n"
+        "- NEVER use bullet points, lists, markdown, asterisks, or any formatting — this is spoken audio.\n"
+        "- NEVER read out greetings like \"Good morning\" or \"Good afternoon\" — just say \"Hi\" or \"Hello\".\n"
+        "- NEVER spell out or read special characters, stars, or symbols.\n"
+        "- Ask one question at a time. Don't overwhelm the caller.\n"
         "- If the customer seems frustrated, acknowledge their feelings first.\n"
-        "- If you cannot resolve the issue within 3 exchanges, offer to connect them to a human agent.\n"
-        "- Never make up information. If unsure, say you'll check and connect them to a specialist.\n"
-        "- Never say \"I'm going to wait\" or narrate what you're doing. Just wait silently for their response.\n\n"
-        "{company_name} offers: Cloud hosting plans (Basic $29/mo, Pro $79/mo, Enterprise $199/mo), "
-        "24/7 technical support, domain registration, SSL certificates, and managed databases.\n\n"
-        "Common issues: Password resets, billing disputes, plan upgrades/downgrades, "
-        "service outages, DNS configuration, SSL renewal."
+        "- If you cannot resolve the issue within 3 exchanges, use the transfer_to_human tool.\n"
+        "- Never make up information. If unsure, say you'll connect them to a specialist.\n"
+        "- When the conversation is complete or the caller says goodbye, use the end_call tool.\n"
     ),
     "mr": (
-        "तुम्ही {company_name} च्या व्यावसायिक ग्राहक सेवा एजंट आहात. तुमचे नाव माया आहे. "
-        "तुम्ही उबदार, मैत्रीपूर्ण आणि व्यावसायिक स्वरात बोलता.\n\n"
-        "नियम:\n"
-        "- प्रत्येक वळणावर जास्तीत जास्त 1 लहान वाक्य. मग थांबा आणि ग्राहकाच्या उत्तराची वाट पहा.\n"
+        "तुम्ही {company_name} च्या व्यावसायिक ग्राहक सेवा प्रतिनिधी आहात. तुमचे नाव माया आहे. "
+        "तुम्ही आत्ता एका लाइव्ह फोन कॉलवर आहात. हे सिम्युलेशन नाही.\n\n"
+        "ओळख (कधीही तोडू नका):\n"
+        "- तुम्ही खऱ्या फोन कॉलवर आहात. कधीही AI, भाषा मॉडेल किंवा सहाय्यक म्हणून स्वतःचा उल्लेख करू नका.\n"
+        "- मध्येच बोलणे तोडले तर \"माफ करा, बोला?\" म्हणा आणि ऐका.\n"
+        "- कॉल बंद करायचा असेल तर end_call टूल वापरा.\n\n"
+        "बोलण्याची पद्धत:\n"
+        "- नैसर्गिकपणे बोला, प्रत्येक वळणावर जास्तीत जास्त 1 लहान वाक्य.\n"
+        "- बुलेट पॉइंट्स, तारे, किंवा फॉरमॅटिंग कधीही वापरू नका — हे बोलले जाणारे ऑडिओ आहे.\n"
         "- एका वेळी एक प्रश्न विचारा.\n"
-        "- सोपी, स्पष्ट भाषा वापरा.\n"
-        "- जर ग्राहक निराश असेल तर प्रथम त्यांच्या भावना मान्य करा.\n"
-        "- जर 3 देवाणघेवाणीत समस्या सोडवता आली नाही तर मानवी एजंटशी जोडण्याची ऑफर द्या.\n"
+        "- जर 3 देवाणघेवाणीत समस्या सोडवता आली नाही तर transfer_to_human टूल वापरा.\n"
         "- माहिती बनवू नका. अनिश्चित असल्यास, तज्ञांशी जोडण्याची ऑफर द्या.\n\n"
         "पूर्णपणे मराठीत उत्तर द्या. इंग्रजी शब्द टाळा."
     ),
 }
+
+
+_TOOL_RULES = (
+    "\n\nTOOL USAGE RULES (mandatory):\n"
+    "- This is a live phone call. You are speaking with a real person.\n"
+    "- NEVER use bullet points, lists, markdown, or formatting — this is spoken audio.\n"
+    "- Keep responses to 1 short sentence per turn, then wait.\n"
+    "- If the caller says goodbye, hangs up, or the conversation is complete, call end_call immediately.\n"
+    "- If you cannot resolve the issue within 3 exchanges, or the caller asks for a human, call transfer_to_human.\n"
+    "- Never make up information. Never break character."
+)
 
 
 def _build_system_prompt(
@@ -113,9 +107,9 @@ def _build_system_prompt(
     company_name: str,
     custom_prompt: str | None = None,
 ) -> str:
-    """Build the full system prompt."""
+    """Build the full system prompt, always appending tool usage rules."""
     if custom_prompt:
-        return custom_prompt
+        return custom_prompt + _TOOL_RULES
     template = _SYSTEM_PROMPTS.get(language, _SYSTEM_PROMPTS["en"])
     return template.format(company_name=company_name)
 
@@ -127,7 +121,6 @@ def prewarm(proc: JobProcess) -> None:
         min_silence_duration=settings.vad_min_silence_duration,
         prefix_padding_duration=0.3,
         activation_threshold=settings.vad_activation_threshold,
-        sample_rate=8000,
     )
 
 
@@ -160,12 +153,12 @@ async def entrypoint(ctx: JobContext) -> None:
     # VAD from prewarm or load fresh
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
 
-    # LLM — Groq via OpenAI-compatible endpoint
+    # LLM — Groq via OpenAI-compatible endpoint (llama-4-scout: fast + good tool calling)
     llm_plugin = openai.LLM(
         model=_settings.groq_model,
         base_url="https://api.groq.com/openai/v1",
         api_key=_settings.groq_api_key,
-        temperature=0.7,
+        temperature=0.2,
     )
 
     # TTS selection based on language
@@ -193,39 +186,58 @@ async def entrypoint(ctx: JobContext) -> None:
         no_delay=True,
         filler_words=False,
         punctuate=True,
-        sample_rate=8000,
     )
 
     # Build system prompt
     base_prompt = _build_system_prompt(language, company_name, custom_system_prompt)
     supervisor_hints: list[str] = []
 
-    # Create agent with turn handling on the Agent (like reference POC)
+    # --- Function tools (replace keyword-based detection) ---
+    room_name = ctx.room.name
+    hangup_scheduled = False
+
+    @function_tool(
+        name="end_call",
+        description="End the phone call. Use when the conversation is complete, the caller says goodbye or asks to hang up, or the call cannot proceed.",
+    )
+    async def tool_end_call(ctx: RunContext, reason: str = "") -> str:
+        logger.info("TOOL end_call: reason=%s, room=%s", reason, room_name)
+        asyncio.create_task(_end_call())
+        return "Call ending. Say a brief goodbye."
+
+    @function_tool(
+        name="transfer_to_human",
+        description="Transfer the caller to a human agent. Use when you cannot resolve the issue, the caller asks for a human, or the situation requires human judgment.",
+    )
+    async def tool_transfer_to_human(ctx: RunContext, reason: str = "") -> str:
+        logger.info("TOOL transfer_to_human: reason=%s, room=%s", reason, room_name)
+        asyncio.create_task(_trigger_escalation(reason or "Customer needs human assistance"))
+        return "Transferring now. Let the caller know you're connecting them."
+
+    # Create agent with tuned turn handling (aligned with sample reference)
     agent = Agent(
         instructions=base_prompt,
         stt=stt_plugin,
         llm=llm_plugin,
         tts=tts_plugin,
         vad=vad,
+        tools=[tool_end_call, tool_transfer_to_human],
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.3,
-                max_delay=0.8,
+                min_delay=0.5,
+                max_delay=1.5,
             ),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.3,
-                min_words=1,
-                resume_false_interruption=True,
+                min_duration=0.8,   # Short enough to catch 2-word questions ("Can you repeat?")
+                min_words=2,        # 2+ words = real interruption (not single-word noise)
+                resume_false_interruption=True,  # Single-word noise ("Okay") resumes instead of restarting
             ),
         ),
         allow_interruptions=True,
     )
-
-    # Closure state for escalation detection
-    escalation_reason: str | None = None
 
     # Handle data messages from supervisor / backend (whisper / barge / handoff)
     @ctx.room.on("data_received")
@@ -249,9 +261,9 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("%s received for room %s — disconnecting agent", msg_type, ctx.room.name)
             asyncio.create_task(_graceful_disconnect(msg.get("reason", msg_type)))
 
-    # Start session — clean, no deprecated options
+    # Start session
     session = AgentSession(
-        aec_warmup_duration=0.5,
+        aec_warmup_duration=1.5,
     )
 
     await session.start(
@@ -264,64 +276,25 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     logger.info("LiveKit agent started in room %s", ctx.room.name)
 
+    @session.on("close")
+    def _on_session_close(*_):
+        logger.info("Session closed: room=%s", ctx.room.name)
+        if not hangup_scheduled:
+            logger.warning("Session closed without scheduled hangup — forcing disconnect")
+            asyncio.create_task(_end_call())
+
     # Wait for the plivo-bridge participant to connect, then generate greeting
     async def _greet():
         try:
             participant = await ctx.wait_for_participant(identity="plivo-bridge")
             logger.info("Plivo bridge connected: %s", participant.identity)
-            # Let the LLM generate the greeting naturally
             session.generate_reply(
-                instructions="The customer just connected to the call. Greet them warmly, introduce yourself, and ask how you can help today."
+                instructions="Someone just picked up the phone. Say hi, give your name, and ask how you can help. Keep it to one short sentence."
             )
         except RuntimeError:
             logger.warning("Session closed before greeting could be sent")
 
     asyncio.create_task(_greet())
-
-    # --- Escalation / end-call detection via conversation events ---
-    esc_phrases = _ESCALATION_PHRASES | (_ESCALATION_PHRASES_MR if language == "mr" else set())
-    end_phrases = _END_CALL_PHRASES | (_END_CALL_PHRASES_MR if language == "mr" else set())
-
-    @session.on("conversation_item_added")
-    def _on_conversation_item(event) -> None:
-        nonlocal escalation_reason
-        item = event.item
-        if not hasattr(item, "role") or item.role != "assistant":
-            return
-        text_lower = (getattr(item, "text_content", None) or "").lower()
-        if not text_lower:
-            return
-
-        if any(p in text_lower for p in esc_phrases):
-            escalation_reason = "AI offered transfer"
-            logger.info("LLM flagged escalation in room %s", ctx.room.name)
-            asyncio.create_task(_trigger_escalation())
-        elif any(p in text_lower for p in end_phrases):
-            logger.info("LLM flagged end-call in room %s", ctx.room.name)
-            asyncio.create_task(_end_call())
-
-    # --- Barge-in signaling ---
-    @session.on("agent_state_changed")
-    def _on_agent_state(event, **kwargs) -> None:
-        if event.old_state == "speaking" and event.new_state == "listening":
-            logger.info("Agent interrupted (barge-in) in room %s", ctx.room.name)
-            asyncio.create_task(_publish_barge_in())
-
-    @session.on("user_state_changed")
-    def _on_user_state(event, **kwargs) -> None:
-        if event.new_state == "speaking" and session.agent_state == "speaking":
-            logger.info("User speaking during agent speech — sending early barge-in")
-            asyncio.create_task(_publish_barge_in())
-
-    async def _publish_barge_in() -> None:
-        try:
-            await ctx.room.local_participant.publish_data(
-                json.dumps({"type": "barge_in"}).encode(),
-                reliable=True,
-                topic="bridge-control",
-            )
-        except Exception:
-            logger.warning("Failed to publish barge_in signal", exc_info=True)
 
     async def _graceful_disconnect(reason: str) -> None:
         logger.info("Graceful disconnect: reason=%s, room=%s", reason, ctx.room.name)
@@ -335,7 +308,19 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.warning("Error disconnecting from room", exc_info=True)
 
     async def _end_call() -> None:
-        await asyncio.sleep(2.0)  # let farewell audio play through
+        nonlocal hangup_scheduled
+        if hangup_scheduled:
+            return  # Prevent duplicate hangup tasks
+        hangup_scheduled = True
+
+        # Wait for all pending TTS speech to finish playing
+        try:
+            await session.drain()
+            logger.info("Speech drained, proceeding with hangup")
+        except Exception as e:
+            logger.warning("Drain failed, falling back to delay: %s", e)
+            await asyncio.sleep(3.0)
+
         if conversation_id:
             try:
                 from app.db.engine import async_session_factory
@@ -357,9 +342,28 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.info("Call ended by AI for conv=%s", conversation_id)
             except Exception:
                 logger.warning("Failed to end call via state machine", exc_info=True)
+
+        # Remove plivo-bridge participant to force call hangup on the Plivo side
+        try:
+            lk_api = api.LiveKitAPI(
+                _settings.livekit_url,
+                _settings.livekit_api_key,
+                _settings.livekit_api_secret,
+            )
+            await lk_api.room.remove_participant(
+                api.RoomParticipantIdentity(
+                    room=ctx.room.name,
+                    identity="plivo-bridge",
+                )
+            )
+            await lk_api.aclose()
+            logger.info("Plivo bridge removed — call ended: room=%s", ctx.room.name)
+        except Exception as e:
+            logger.warning("Failed to remove plivo-bridge participant: %s", e)
+
         await _graceful_disconnect("end_call")
 
-    async def _trigger_escalation() -> None:
+    async def _trigger_escalation(reason: str = "") -> None:
         if conversation_id:
             try:
                 from app.db.engine import async_session_factory
@@ -371,7 +375,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         db=db,
                         conversation_id=UUID(conversation_id),
                         trigger=Trigger.AI_TRANSFER,
-                        metadata={"reason": escalation_reason or "AI escalation"},
+                        metadata={"reason": reason or "AI escalation"},
                     )
                     await db.commit()
                 logger.info("Escalation triggered for conv=%s", conversation_id)
