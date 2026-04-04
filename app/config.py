@@ -46,6 +46,22 @@ class Settings(BaseSettings):
 
     # Bridge audio
     bridge_silence_threshold: int = 50
+
+    # Voice pipeline tuning
+    deepgram_stt_model: str = "nova-3"
+    deepgram_tts_model: str = "aura-asteria-en"
+    deepgram_endpointing_ms: int = 300
+    sarvam_tts_speaker: str = "ritu"
+    llm_timeout_seconds: float = 12.0
+    llm_max_tokens: int = 250
+    vad_min_silence_duration: float = 0.3
+    vad_activation_threshold: float = 0.45
+    bargein_min_duration: float = 0.15
+    greeting_cache_timeout: float = 1.5
+    plivo_send_max_retries: int = 3
+    circuit_breaker_threshold: int = 3
+    queue_timeout_seconds: int = 300
+
     # Filler audio played while AI pipeline connects (eliminates dead air)
     plivo_filler_audio_url: str = ""
 

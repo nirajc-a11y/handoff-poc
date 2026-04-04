@@ -7,6 +7,7 @@ Last resort: Mock responses (no API keys configured)
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -139,7 +140,9 @@ class AIEngine:
         # Circuit breaker: fail fast after consecutive API failures
         self._groq_failures: int = 0
         self._sarvam_failures: int = 0
-        self._circuit_breaker_threshold: int = 3  # open circuit after N consecutive failures
+        self._circuit_breaker_threshold: int = settings.circuit_breaker_threshold  # open circuit after N consecutive failures
+        self._llm_timeout_seconds: float = settings.llm_timeout_seconds
+        self._llm_max_tokens: int = settings.llm_max_tokens
 
     def _get_groq_client(self) -> "AsyncGroq":
         """Lazy-init shared AsyncGroq client for connection reuse."""
@@ -166,6 +169,109 @@ class AIEngine:
     def _strip_think_tags(cls, text: str) -> str:
         """Remove <think>...</think> reasoning blocks from LLM output."""
         return cls._THINK_RE.sub("", text).strip()
+
+    # ------------------------------------------------------------------
+    # Confidence scoring
+    # ------------------------------------------------------------------
+
+    def _compute_confidence(
+        self,
+        response_text: str,
+        customer_message: str,
+        turn_count: int,
+        language: str = "en",
+    ) -> float:
+        """Compute a heuristic confidence score for the AI response.
+
+        Factors:
+        - Response length relative to question complexity
+        - Hedging/uncertainty language
+        - Question-to-question pattern
+        - Turn count decay (long conversations = lower confidence)
+        """
+        score = 0.85  # base confidence
+
+        # Short response to long question = likely inadequate
+        if len(response_text) < 20 and len(customer_message) > 50:
+            score -= 0.25
+
+        # Hedging language detection
+        response_lower = response_text.lower()
+        hedging_phrases = [
+            "i'm not sure", "i don't know", "i cannot", "i can't help",
+            "i'm unable", "not certain", "i think", "maybe", "possibly",
+            "i apologize but i", "unfortunately i cannot",
+        ]
+        if language == "mr":
+            hedging_phrases.extend([
+                "मला माहीत नाही", "मला खात्री नाही", "कदाचित",
+                "मला शक्य नाही", "माफ करा पण",
+            ])
+        for phrase in hedging_phrases:
+            if phrase in response_lower:
+                score -= 0.15
+                break  # only penalize once
+
+        # AI responding with a question to a question = deflection
+        if customer_message.strip().endswith("?") and response_text.strip().endswith("?"):
+            score -= 0.1
+
+        # Turn count decay: after turn 5, confidence decreases
+        if turn_count > 5:
+            score -= 0.02 * (turn_count - 5)
+
+        # Very short response (under 10 chars) is suspicious
+        if len(response_text.strip()) < 10:
+            score -= 0.15
+
+        return max(0.1, min(1.0, score))  # clamp to [0.1, 1.0]
+
+    # ------------------------------------------------------------------
+    # Fuzzy escalation matching
+    # ------------------------------------------------------------------
+
+    def _check_escalation_fuzzy(self, message: str, language: str = "en") -> str | None:
+        """Check for escalation keywords with fuzzy matching for typo tolerance.
+
+        Returns the matched keyword or None.
+        """
+        keywords = self.ESCALATION_KEYWORDS_MR if language == "mr" else self.ESCALATION_KEYWORDS
+        message_lower = message.lower()
+
+        # Exact substring match first (fast path)
+        for keyword in keywords:
+            if keyword in message_lower:
+                return keyword
+
+        # Fuzzy match individual words for typo tolerance
+        words = message_lower.split()
+        for word in words:
+            if len(word) < 3:
+                continue  # skip very short words
+            matches = difflib.get_close_matches(word, keywords, n=1, cutoff=0.8)
+            if matches:
+                return matches[0]
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Frustration detection
+    # ------------------------------------------------------------------
+
+    FRUSTRATION_WORDS: set[str] = {
+        "terrible", "unacceptable", "worst", "horrible", "awful",
+        "disgusting", "ridiculous", "pathetic", "useless", "incompetent",
+    }
+    FRUSTRATION_WORDS_MR: set[str] = {
+        "भयंकर", "अस्वीकार्य", "खराब", "वाईट", "निरुपयोगी",
+    }
+
+    def _check_frustration(self, message: str, language: str = "en") -> bool:
+        """Check if message contains strong frustration indicators."""
+        words = self.FRUSTRATION_WORDS_MR if language == "mr" else self.FRUSTRATION_WORDS
+        message_lower = message.lower()
+        count = sum(1 for w in words if w in message_lower)
+        return count >= 1  # even one strong negative word is a signal
 
     # ------------------------------------------------------------------
     # Audio transcription (Groq Whisper — kept for batch recording use)
@@ -225,28 +331,26 @@ class AIEngine:
         Checks for escalation keywords first, then delegates to Sarvam 30B
         (or Groq / mock fallback), and finally checks turn limits.
         """
-        keywords = self.ESCALATION_KEYWORDS_MR if language == "mr" else self.ESCALATION_KEYWORDS
-
         if system_prompt is None:
             system_prompt = SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"])
 
-        # 1. Check for explicit escalation keywords
-        message_lower = customer_message.lower()
-        for keyword in keywords:
-            if keyword in message_lower:
-                escalation_text = (
-                    "मला समजले की तुम्हाला मानवी एजंटशी बोलायचे आहे. मी तुम्हाला आता जोडतो."
-                    if language == "mr"
-                    else "I understand you'd like to speak with a human agent. Let me transfer you now."
-                )
-                return AIResponse(
-                    text=escalation_text,
-                    confidence=1.0,
-                    should_escalate=True,
-                    escalation_reason=f"customer_requested: '{keyword}'",
-                )
+        # 1. Check for explicit escalation keywords (with fuzzy matching)
+        matched_keyword = self._check_escalation_fuzzy(customer_message, language)
+        if matched_keyword:
+            escalation_text = (
+                "मला समजले की तुम्हाला मानवी एजंटशी बोलायचे आहे. मी तुम्हाला आता जोडतो."
+                if language == "mr"
+                else "I understand you'd like to speak with a human agent. Let me transfer you now."
+            )
+            return AIResponse(
+                text=escalation_text,
+                confidence=1.0,
+                should_escalate=True,
+                escalation_reason=f"customer_requested: '{matched_keyword}'",
+            )
 
         # 1b. Check for hangup / goodbye keywords
+        message_lower = customer_message.lower()
         hangup_kw = self.HANGUP_KEYWORDS_MR if language == "mr" else self.HANGUP_KEYWORDS
         for keyword in hangup_kw:
             if keyword in message_lower:
@@ -267,21 +371,30 @@ class AIEngine:
 
         # 3. Call LLM: Groq primary (fast TTFT, no reasoning overhead),
         #    Sarvam fallback, mock last resort
-        text, confidence = None, 0.85
+        text, base_confidence = None, 0.80
         if self.groq_api_key and _GROQ_AVAILABLE:
             try:
-                text, confidence = await self._call_groq(system_prompt, conversation_history, customer_message)
+                text, base_confidence = await self._call_groq(system_prompt, conversation_history, customer_message)
             except Exception:
                 logger.exception("Groq LLM failed; trying Sarvam fallback")
 
         if text is None and self.sarvam_api_key:
             try:
-                text, confidence = await self._call_sarvam(system_prompt, conversation_history, customer_message)
+                text, base_confidence = await self._call_sarvam(system_prompt, conversation_history, customer_message)
             except Exception:
                 logger.exception("Sarvam LLM also failed; using mock response")
 
         if text is None:
             return self._mock_response(customer_message, turn_count, language)
+
+        # 3b. Compute real confidence from heuristics
+        confidence = self._compute_confidence(text, customer_message, turn_count, language)
+        logger.info("Confidence: base=%.2f computed=%.2f (turn %d)", base_confidence, confidence, turn_count)
+
+        # 3c. Check frustration — lower confidence further
+        if self._check_frustration(customer_message, language):
+            confidence = max(0.1, confidence - 0.15)
+            logger.info("Frustration detected, confidence adjusted to %.2f", confidence)
 
         # 4. Check turn limit
         if turn_count >= max_turns:
@@ -318,7 +431,7 @@ class AIEngine:
         messages.extend(history[-10:])
         messages.append({"role": "user", "content": message})
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self._llm_timeout_seconds, connect=5.0)) as client:
             resp = await client.post(
                 f"{self.SARVAM_BASE}/v1/chat/completions",
                 headers=self._get_sarvam_headers(),
@@ -326,7 +439,7 @@ class AIEngine:
                     "model": self.sarvam_model,
                     "messages": messages,
                     "temperature": 0.7,
-                    "max_tokens": 150,
+                    "max_tokens": self._llm_max_tokens,
                 },
             )
             if resp.status_code >= 400:
@@ -337,7 +450,7 @@ class AIEngine:
         text = (result["choices"][0]["message"]["content"] or "").strip()
         text = self._strip_think_tags(text)
         logger.info("Sarvam LLM: %s", text[:100])
-        return text, 0.85
+        return text, 0.80
 
     async def _call_sarvam_stream(
         self,
@@ -355,7 +468,7 @@ class AIEngine:
         messages.extend(history[-10:])
         messages.append({"role": "user", "content": message})
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self._llm_timeout_seconds, connect=5.0)) as client:
             async with client.stream(
                 "POST",
                 f"{self.SARVAM_BASE}/v1/chat/completions",
@@ -364,7 +477,7 @@ class AIEngine:
                     "model": self.sarvam_model,
                     "messages": messages,
                     "temperature": 0.7,
-                    "max_tokens": 150,
+                    "max_tokens": self._llm_max_tokens,
                     "stream": True,
                 },
             ) as resp:
@@ -461,11 +574,11 @@ class AIEngine:
             model=self.groq_model,
             messages=messages,
             temperature=0.7,
-            max_tokens=150,
+            max_tokens=self._llm_max_tokens,
         )
 
         text = (completion.choices[0].message.content or "").strip()
-        return text, 0.85
+        return text, 0.80
 
     async def _call_groq_stream(
         self,
@@ -484,7 +597,7 @@ class AIEngine:
             model=self.groq_model,
             messages=messages,
             temperature=0.7,
-            max_tokens=80,
+            max_tokens=self._llm_max_tokens,
             stream=True,
         )
 
@@ -529,23 +642,22 @@ class AIEngine:
             - For keyword matches: (text, AIResponse) — single yield
             - For LLM sentences: (sentence, None) — multiple yields
         """
-        # Check escalation keywords
-        keywords = self.ESCALATION_KEYWORDS_MR if language == "mr" else self.ESCALATION_KEYWORDS
-        message_lower = customer_message.lower()
-        for keyword in keywords:
-            if keyword in message_lower:
-                escalation_text = (
-                    "मला समजले की तुम्हाला मानवी एजंटशी बोलायचे आहे. मी तुम्हाला आता जोडतो."
-                    if language == "mr"
-                    else "I understand you'd like to speak with a human agent. Let me transfer you now."
-                )
-                yield escalation_text, AIResponse(
-                    text=escalation_text, confidence=1.0,
-                    should_escalate=True, escalation_reason=f"customer_requested: '{keyword}'",
-                )
-                return
+        # Check escalation keywords (with fuzzy matching)
+        matched_keyword = self._check_escalation_fuzzy(customer_message, language)
+        if matched_keyword:
+            escalation_text = (
+                "मला समजले की तुम्हाला मानवी एजंटशी बोलायचे आहे. मी तुम्हाला आता जोडतो."
+                if language == "mr"
+                else "I understand you'd like to speak with a human agent. Let me transfer you now."
+            )
+            yield escalation_text, AIResponse(
+                text=escalation_text, confidence=1.0,
+                should_escalate=True, escalation_reason=f"customer_requested: '{matched_keyword}'",
+            )
+            return
 
         # Check hangup keywords
+        message_lower = customer_message.lower()
         hangup_kw = self.HANGUP_KEYWORDS_MR if language == "mr" else self.HANGUP_KEYWORDS
         for keyword in hangup_kw:
             if keyword in message_lower:
