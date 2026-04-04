@@ -4,6 +4,7 @@ import { plivoRegisteredAtom, plivoOnCallAtom, plivoRingingAtom } from '@/stores
 
 declare global {
   interface Window {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Plivo WebRTC SDK loaded via script tag, no type definitions available
     Plivo: any
   }
 }
@@ -23,6 +24,7 @@ export function usePlivo() {
     isRegistered: false, isRinging: false, isOnCall: false,
     isMuted: false, isOnHold: false, callerId: null, callDuration: 0,
   })
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Plivo WebRTC SDK has no TypeScript type definitions
   const plivoRef = useRef<any>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const setGlobalRegistered = useSetAtom(plivoRegisteredAtom)

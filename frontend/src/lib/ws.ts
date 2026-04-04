@@ -8,10 +8,15 @@ export class WebSocketManager {
   private handlers: EventHandler[] = []
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private reconnectDelay = 1000
+  private retryCount = 0
+  private maxRetries = 15
   private onStatusChange: ((connected: boolean) => void) | null = null
+  private onMaxRetriesReached: (() => void) | null = null
 
-  connect(tenantId: string, onStatus?: (connected: boolean) => void) {
+  connect(tenantId: string, onStatus?: (connected: boolean) => void, onMaxRetries?: () => void) {
     this.onStatusChange = onStatus ?? null
+    this.onMaxRetriesReached = onMaxRetries ?? null
+    this.retryCount = 0
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     this.url = `${protocol}//${location.host}/api/v1/ws/dashboard?tenant_id=${tenantId}`
     this._connect()
@@ -20,7 +25,7 @@ export class WebSocketManager {
   private _connect() {
     this.ws?.close()
     this.ws = new WebSocket(this.url)
-    this.ws.onopen = () => { this.reconnectDelay = 1000; this.onStatusChange?.(true) }
+    this.ws.onopen = () => { this.reconnectDelay = 1000; this.retryCount = 0; this.onStatusChange?.(true) }
     this.ws.onmessage = (e) => {
       try {
         const data: WSEvent = JSON.parse(e.data as string)
@@ -35,11 +40,25 @@ export class WebSocketManager {
 
   private _scheduleReconnect() {
     if (this.reconnectTimeout) return
+    this.retryCount++
+    if (this.retryCount >= this.maxRetries) {
+      this.onMaxRetriesReached?.()
+      return
+    }
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000)
       this._connect()
     }, this.reconnectDelay)
+  }
+
+  reconnect() {
+    this.retryCount = 0
+    this._connect()
+  }
+
+  get exhausted(): boolean {
+    return this.retryCount >= this.maxRetries
   }
 
   subscribe(handler: EventHandler) {

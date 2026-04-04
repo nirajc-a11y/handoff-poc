@@ -4,11 +4,18 @@ import { api } from '@/lib/api'
 import { tenantIdAtom } from '@/stores/auth'
 import type { Conversation } from '@/lib/types'
 
-export function useActiveConversations() {
+export interface PaginatedConversations {
+  items: Conversation[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export function useActiveConversations(limit = 50, offset = 0) {
   const tenantId = useAtomValue(tenantIdAtom)
-  return useQuery<Conversation[]>({
-    queryKey: ['conversations', tenantId, 'active'],
-    queryFn: () => api.get('/conversations/active'),
+  return useQuery<PaginatedConversations>({
+    queryKey: ['conversations', tenantId, 'active', limit, offset],
+    queryFn: () => api.get(`/conversations/active?limit=${limit}&offset=${offset}`),
     enabled: !!tenantId,
   })
 }

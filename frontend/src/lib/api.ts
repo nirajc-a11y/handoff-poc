@@ -1,5 +1,6 @@
 import { getDefaultStore } from 'jotai'
 import { tenantIdAtom, userIdAtom } from '@/stores/auth'
+import { ApiError, AuthError, NotFoundError, ConflictError, ValidationError, RateLimitError, PayloadTooLargeError } from './errors'
 
 const store = getDefaultStore()
 
@@ -17,8 +18,18 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   const res = await fetch(`/api/v1${path}`, { ...options, headers })
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error((error as { detail?: string }).detail || `API error: ${res.status}`)
+    const body = await res.json().catch(() => ({ detail: res.statusText }))
+    const detail = (body as { detail?: string }).detail || `API error: ${res.status}`
+
+    switch (res.status) {
+      case 401: throw new AuthError(detail)
+      case 404: throw new NotFoundError(detail)
+      case 409: throw new ConflictError(detail)
+      case 413: throw new PayloadTooLargeError(detail)
+      case 422: throw new ValidationError(detail)
+      case 429: throw new RateLimitError(detail)
+      default: throw new ApiError(res.status, detail)
+    }
   }
 
   return res.json() as Promise<T>

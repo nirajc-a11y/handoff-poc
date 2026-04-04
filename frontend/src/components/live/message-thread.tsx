@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useMessages } from '@/hooks/use-messages'
 import { cn, formatTime } from '@/lib/utils'
+import { MessageThreadSkeleton } from './message-thread-skeleton'
 
 interface MessageThreadProps {
   conversationId: string
@@ -9,7 +10,7 @@ interface MessageThreadProps {
 }
 
 export function MessageThread({ conversationId, hideRecordings }: MessageThreadProps) {
-  const { data: raw = [] } = useMessages(conversationId)
+  const { data: raw = [], isLoading } = useMessages(conversationId)
   const messages = hideRecordings
     ? raw.filter((m) => !(m.content_type === 'audio' && (m.sender_type === 'system' || m.sender_type === 'ivr')))
     : raw
@@ -20,6 +21,10 @@ export function MessageThread({ conversationId, hideRecordings }: MessageThreadP
     const el = bottomRef.current?.closest('[data-scroll-container]') as HTMLElement | null
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length])
+
+  if (isLoading) {
+    return <MessageThreadSkeleton count={4} />
+  }
 
   if (messages.length === 0) {
     return (

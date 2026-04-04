@@ -1,3 +1,4 @@
+import { useAtom } from 'jotai'
 import {
   Phone,
   BarChart3,
@@ -18,6 +19,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import {
+  Sheet,
+  SheetContent,
+  SheetTitle,
+} from '@/components/ui/sheet'
+import { mobileSidebarOpenAtom } from '@/stores/ui'
 
 const navItems = [
   { key: 'live', label: 'Live', icon: Phone },
@@ -37,57 +44,100 @@ interface SidebarProps {
   onToggle: () => void
 }
 
-export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: SidebarProps) {
+function SidebarNav({
+  currentPage,
+  onNavigate,
+  collapsed,
+  onItemClick,
+}: {
+  currentPage: string
+  onNavigate: (page: string) => void
+  collapsed: boolean
+  onItemClick?: () => void
+}) {
   return (
-    <div
-      className={cn(
-        'flex h-full flex-col border-r border-border bg-white transition-all duration-200',
-        collapsed ? 'w-14' : 'w-52'
-      )}
-    >
-      <div className="flex items-center justify-end p-2">
-        <Button variant="ghost" size="icon-sm" onClick={onToggle}>
-          {collapsed ? <PanelLeft className="size-4" /> : <PanelLeftClose className="size-4" />}
-        </Button>
+    <nav className="flex flex-1 flex-col gap-1 px-2">
+      <TooltipProvider>
+        {navItems.map((item) => {
+          const Icon = item.icon
+          const isActive = currentPage === item.key
+
+          const button = (
+            <button
+              key={item.key}
+              onClick={() => {
+                onNavigate(item.key)
+                onItemClick?.()
+              }}
+              className={cn(
+                'flex w-full items-center gap-3 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-blue-50 text-blue-700'
+                  : 'text-gray-600 hover:bg-muted hover:text-gray-900'
+              )}
+            >
+              <Icon className="size-4 shrink-0" />
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          )
+
+          if (collapsed) {
+            return (
+              <Tooltip key={item.key}>
+                <TooltipTrigger render={<div />}>
+                  {button}
+                </TooltipTrigger>
+                <TooltipContent side="right">{item.label}</TooltipContent>
+              </Tooltip>
+            )
+          }
+
+          return button
+        })}
+      </TooltipProvider>
+    </nav>
+  )
+}
+
+export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: SidebarProps) {
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useAtom(mobileSidebarOpenAtom)
+
+  return (
+    <>
+      {/* Desktop sidebar */}
+      <div
+        className={cn(
+          'hidden md:flex h-full flex-col border-r border-border bg-white transition-all duration-200',
+          collapsed ? 'w-14' : 'w-52'
+        )}
+      >
+        <div className="flex items-center justify-end p-2">
+          <Button variant="ghost" size="icon-sm" onClick={onToggle}>
+            {collapsed ? <PanelLeft className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </Button>
+        </div>
+
+        <SidebarNav
+          currentPage={currentPage}
+          onNavigate={onNavigate}
+          collapsed={collapsed}
+        />
       </div>
 
-      <nav className="flex flex-1 flex-col gap-1 px-2">
-        <TooltipProvider>
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const isActive = currentPage === item.key
-
-            const button = (
-              <button
-                key={item.key}
-                onClick={() => onNavigate(item.key)}
-                className={cn(
-                  'flex w-full items-center gap-3 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-blue-50 text-blue-700'
-                    : 'text-gray-600 hover:bg-muted hover:text-gray-900'
-                )}
-              >
-                <Icon className="size-4 shrink-0" />
-                {!collapsed && <span>{item.label}</span>}
-              </button>
-            )
-
-            if (collapsed) {
-              return (
-                <Tooltip key={item.key}>
-                  <TooltipTrigger render={<div />}>
-                    {button}
-                  </TooltipTrigger>
-                  <TooltipContent side="right">{item.label}</TooltipContent>
-                </Tooltip>
-              )
-            }
-
-            return button
-          })}
-        </TooltipProvider>
-      </nav>
-    </div>
+      {/* Mobile sidebar (sheet/drawer) */}
+      <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+        <SheetContent side="left" className="w-64 p-0" showCloseButton>
+          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <div className="flex h-full flex-col pt-12">
+            <SidebarNav
+              currentPage={currentPage}
+              onNavigate={onNavigate}
+              collapsed={false}
+              onItemClick={() => setMobileSidebarOpen(false)}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
   )
 }

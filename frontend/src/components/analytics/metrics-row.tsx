@@ -31,7 +31,7 @@ function MetricCard({ label, value, icon, sub }: MetricCardProps) {
 }
 
 export function MetricsRow() {
-  const { data: activeCalls = [] } = useActiveConversations()
+  const { data: activeData } = useActiveConversations()
   const { data: queueStats } = useQueueStats()
   const { data: agents = [] } = useAgents()
   const { data: campaigns = [] } = useCampaigns()
@@ -45,7 +45,7 @@ export function MetricsRow() {
     <div className="flex gap-4">
       <MetricCard
         label="Active Calls"
-        value={activeCalls.length}
+        value={activeData?.total ?? 0}
         icon={<PhoneCall size={18} />}
         sub="right now"
       />

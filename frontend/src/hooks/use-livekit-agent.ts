@@ -128,8 +128,8 @@ export function useLivekitAgent(): LiveKitAgentState & LiveKitAgentActions {
         roomName: tokenRes.room,
         duration: 0,
       })
-    } catch (err: any) {
-      const message = err?.message || 'Failed to connect to LiveKit room'
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to connect to LiveKit room'
       setState(prev => ({ ...prev, error: message }))
       throw err
     }
@@ -192,8 +192,8 @@ export function useLivekitAgent(): LiveKitAgentState & LiveKitAgentActions {
         await api.post(`/calls/${convId}/hold`)
         setState(prev => ({ ...prev, isOnHold: true }))
       }
-    } catch (err: any) {
-      setState(prev => ({ ...prev, error: err?.message || 'Hold/unhold failed' }))
+    } catch (err: unknown) {
+      setState(prev => ({ ...prev, error: err instanceof Error ? err.message : 'Hold/unhold failed' }))
     }
   }, [state.isOnHold])
 

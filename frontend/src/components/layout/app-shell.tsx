@@ -3,8 +3,10 @@ import { useAtom, useAtomValue } from 'jotai'
 import { sidebarCollapsedAtom } from '@/stores/ui'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { useWebSocket } from '@/hooks/use-websocket'
+import { ErrorBoundary } from '@/components/error-boundary'
 import { Sidebar } from './sidebar'
 import { Header } from './header'
+import { OfflineIndicator } from '@/components/offline-indicator'
 import { LivePage } from '@/pages/live'
 import { AnalyticsPage } from '@/pages/analytics'
 import { CampaignsPage } from '@/pages/campaigns'
@@ -56,6 +58,7 @@ export function AppShell() {
   return (
     <div className="flex h-screen flex-col bg-background">
       <Header />
+      <OfflineIndicator />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
           currentPage={currentPage}
@@ -64,6 +67,7 @@ export function AppShell() {
           onToggle={() => setCollapsed(!collapsed)}
         />
         <main className="flex-1 overflow-hidden">
+          <ErrorBoundary>
           {tenantId && isConnected ? (
             renderPage()
           ) : (
@@ -73,6 +77,7 @@ export function AppShell() {
               </p>
             </div>
           )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>

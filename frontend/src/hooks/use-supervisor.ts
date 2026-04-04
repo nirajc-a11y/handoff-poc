@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import type { Room } from 'livekit-client'
 import { api } from '@/lib/api'
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,8 @@ interface ListenState {
 
 export function useSupervisorListen(convId: string | null) {
   const [state, setState] = useState<ListenState>({ isListening: false, error: null })
-  const roomRef = useRef<any>(null)
+  const roomRef = useRef<Room | null>(null)
+  const userStoppedRef = useRef(false)
   // Legacy fallback refs
   const wsRef = useRef<WebSocket | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
@@ -21,6 +23,7 @@ export function useSupervisorListen(convId: string | null) {
 
   const startListening = useCallback(async () => {
     if (!convId) return
+    userStoppedRef.current = false
 
     // Try LiveKit first
     try {
@@ -37,6 +40,14 @@ export function useSupervisorListen(convId: string | null) {
       room.on(RoomEvent.Disconnected, () => {
         setState({ isListening: false, error: null })
         roomRef.current = null
+      })
+
+      room.on(RoomEvent.Reconnecting, () => {
+        setState({ isListening: true, error: 'Reconnecting...' })
+      })
+
+      room.on(RoomEvent.Reconnected, () => {
+        setState({ isListening: true, error: null })
       })
 
       await room.connect(tokenRes.url, tokenRes.token)
@@ -89,14 +100,30 @@ export function useSupervisorListen(convId: string | null) {
       }
     }
 
+    let reconnectAttempts = 0
+    const maxReconnectAttempts = 3
+
     ws.onerror = () => setState({ isListening: false, error: 'WebSocket connection failed' })
     ws.onclose = () => {
-      setState((s) => ({ ...s, isListening: false }))
       wsRef.current = null
+      // Auto-reconnect if we were listening and stop wasn't user-initiated
+      if (reconnectAttempts < maxReconnectAttempts && !userStoppedRef.current) {
+        reconnectAttempts++
+        setState({ isListening: true, error: `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...` })
+        setTimeout(() => {
+          if (!wsRef.current) startListening()
+        }, 1000 * reconnectAttempts) // backoff: 1s, 2s, 3s
+      } else {
+        setState({
+          isListening: false,
+          error: reconnectAttempts >= maxReconnectAttempts ? 'Connection lost after retries' : null,
+        })
+      }
     }
   }, [convId])
 
   const stopListening = useCallback(() => {
+    userStoppedRef.current = true
     // LiveKit cleanup
     if (roomRef.current) {
       roomRef.current.disconnect()

@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { useQueryClient } from '@tanstack/react-query'
 import { wsManager } from '@/lib/ws'
-import { wsConnectedAtom, wsEventsAtom } from '@/stores/ws'
+import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom } from '@/stores/ws'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
@@ -13,6 +13,7 @@ export function useWebSocket() {
   const isConnected = useAtomValue(isConnectedAtom)
   const [, setConnected] = useAtom(wsConnectedAtom)
   const [, setEvents] = useAtom(wsEventsAtom)
+  const [, setExhausted] = useAtom(wsExhaustedAtom)
   const setSelectedConvId = useSetAtom(selectedConvIdAtom)
   const qc = useQueryClient()
 
@@ -24,7 +25,14 @@ export function useWebSocket() {
 
   useEffect(() => {
     if (!tenantId || !isConnected) return
-    wsManager.connect(tenantId, setConnected)
+    wsManager.connect(
+      tenantId,
+      (connected) => {
+        setConnected(connected)
+        if (connected) setExhausted(false)
+      },
+      () => setExhausted(true),
+    )
     const unsub = wsManager.subscribe((event: WSEvent) => {
       setEvents((prev) => [event, ...prev].slice(0, 100))
 
@@ -71,5 +79,5 @@ export function useWebSocket() {
       }
     })
     return () => { unsub(); wsManager.disconnect() }
-  }, [tenantId, isConnected, setConnected, setEvents, qc])
+  }, [tenantId, isConnected, setConnected, setExhausted, setEvents, qc])
 }

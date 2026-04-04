@@ -13,6 +13,9 @@ import { MessageInput } from './message-input'
 import { TranscriptPanel } from './transcript-panel'
 import { SupervisorPanel } from './supervisor-panel'
 import { ActionBar } from './action-bar'
+import { ErrorBoundary } from '@/components/error-boundary'
+import { Skeleton } from '@/components/ui/skeleton'
+import { ConversationDetailSkeleton } from './conversation-detail-skeleton'
 
 const FLOW_STEPS = [
   { key: 'initiated', label: 'Initiated', icon: Phone },
@@ -112,14 +115,7 @@ export function ConversationDetail() {
   }
 
   if (isLoading || !conversation) {
-    return (
-      <div className="flex h-full items-center justify-center bg-white border-x border-border">
-        <div className="flex items-center gap-2 text-gray-400">
-          <div className="size-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
-          <p className="text-sm">Loading...</p>
-        </div>
-      </div>
-    )
+    return <ConversationDetailSkeleton />
   }
 
   const channelIcon = channelIcons[conversation.channel] ?? '?'
@@ -244,28 +240,34 @@ export function ConversationDetail() {
       </div>
 
       {/* Scrollable content area */}
-      <div
-        ref={scrollRef}
-        data-scroll-container
-        className="min-h-0 flex-1 overflow-y-auto"
-        style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}
-      >
-        {tab === 'messages' && <MessageThread conversationId={conversation.id} hideRecordings={!!conversation.recording_url} />}
-        {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
-        {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
-        {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
-        {tab === 'supervise' && <SupervisorPanel conversationId={conversation.id} isActive={conversation.state !== 'ended' && conversation.state !== 'failed'} />}
-      </div>
-
-      {/* Message input (only on messages tab) */}
-      {tab === 'messages' && (
-        <div className="shrink-0">
-          <MessageInput conversationId={conversation.id} channel={conversation.channel} />
+      <ErrorBoundary fallback={<div className="p-4 text-sm text-red-500">Failed to load conversation content</div>}>
+        <div
+          ref={scrollRef}
+          data-scroll-container
+          className="min-h-0 flex-1 overflow-y-auto"
+          style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}
+        >
+          {tab === 'messages' && <MessageThread conversationId={conversation.id} hideRecordings={!!conversation.recording_url} />}
+          {tab === 'transcript' && <TranscriptPanel conversationId={conversation.id} />}
+          {tab === 'handoffs' && <HandoffTimeline events={handoffs} />}
+          {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
+          {tab === 'supervise' && (
+            <ErrorBoundary fallback={<div className="p-4 text-sm text-red-500">Supervisor panel encountered an error</div>}>
+              <SupervisorPanel conversationId={conversation.id} isActive={conversation.state !== 'ended' && conversation.state !== 'failed'} />
+            </ErrorBoundary>
+          )}
         </div>
-      )}
 
-      {/* Action bar */}
-      <ActionBar conversation={conversation} />
+        {/* Message input (only on messages tab) */}
+        {tab === 'messages' && (
+          <div className="shrink-0">
+            <MessageInput conversationId={conversation.id} channel={conversation.channel} />
+          </div>
+        )}
+
+        {/* Action bar */}
+        <ActionBar conversation={conversation} />
+      </ErrorBoundary>
     </div>
   )
 }
@@ -316,7 +318,21 @@ function EmailThreadPanel({ conversationId }: { conversationId: string }) {
   const { data: thread = [], isLoading } = useEmailThread(conversationId)
 
   if (isLoading) {
-    return <p className="py-8 text-center text-xs text-gray-400">Loading email thread…</p>
+    return (
+      <div className="flex flex-col gap-3 p-4">
+        {Array.from({ length: 3 }, (_, i) => (
+          <div key={i} className="rounded-lg border bg-white p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-2.5 w-14" />
+            </div>
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-2/3" />
+          </div>
+        ))}
+      </div>
+    )
   }
 
   if (thread.length === 0) {
