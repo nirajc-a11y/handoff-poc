@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -68,18 +68,27 @@ class ConversationService:
         self,
         db: AsyncSession,
         tenant_id: UUID,
-    ) -> list[Conversation]:
-        """Return all conversations that have not ended or failed."""
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Conversation], int]:
+        """Return conversations that have not ended or failed, with total count."""
+        base_filter = [
+            Conversation.tenant_id == tenant_id,
+            Conversation.state.notin_(["ended", "failed"]),
+        ]
+
+        count_stmt = select(func.count()).select_from(Conversation).where(*base_filter)
+        total = (await db.execute(count_stmt)).scalar_one()
+
         stmt = (
             select(Conversation)
-            .where(
-                Conversation.tenant_id == tenant_id,
-                Conversation.state.notin_(["ended", "failed"]),
-            )
+            .where(*base_filter)
             .order_by(Conversation.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         result = await db.execute(stmt)
-        return list(result.scalars().all())
+        return list(result.scalars().all()), total
 
     async def set_disposition(
         self,

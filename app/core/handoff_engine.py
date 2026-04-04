@@ -326,14 +326,20 @@ class HandoffEngine:
         await db.flush()
 
         # Signal the AI agent to disconnect (LiveKit path)
-        await self._send_room_data(conversation.id, {
+        sent = await self._send_room_data(conversation.id, {
             "type": "handoff",
             "reason": metadata.get("reason", "escalation"),
             "conversation_id": str(conversation.id),
-        })
+        }, critical=True)
+        if not sent:
+            logger.error(
+                "CRITICAL: Failed to send handoff signal to room for conversation %s — "
+                "AI agent may not disconnect",
+                conversation.id,
+            )
 
         # Attempt immediate agent assignment
-        agent_id = await self._routing_engine.find_available_agent(
+        agent_id, match_tier = await self._routing_engine.find_available_agent(
             db,
             tenant_id=conversation.tenant_id,
             required_skills=required_skills,
@@ -346,7 +352,7 @@ class HandoffEngine:
             # locked), so we handle the assignment inline instead.
             try:
                 await self._handle_agent_assignment(
-                    db, conversation, {**metadata, "agent_id": str(agent_id)},
+                    db, conversation, {**metadata, "agent_id": str(agent_id), "match_tier": match_tier},
                 )
             except Exception:
                 logger.exception(
@@ -404,11 +410,17 @@ class HandoffEngine:
         )
 
         # Notify the LiveKit room that a human agent has been assigned
-        await self._send_room_data(conversation.id, {
+        sent = await self._send_room_data(conversation.id, {
             "type": "agent_assigned",
             "agent_id": str(agent_id),
             "conversation_id": str(conversation.id),
-        })
+        }, critical=True)
+        if not sent:
+            logger.error(
+                "CRITICAL: Failed to send agent_assigned signal to room for conversation %s — "
+                "room may not know about assignment",
+                conversation.id,
+            )
 
     async def _handle_transfer(
         self,
@@ -689,6 +701,7 @@ class HandoffEngine:
         conversation_id: UUID,
         data: dict,
         retries: int = 2,
+        critical: bool = False,
     ) -> bool:
         """Send a data message to the LiveKit room for this conversation.
 
@@ -698,6 +711,9 @@ class HandoffEngine:
         from app.config import settings
         if not settings.use_livekit_agent or not settings.livekit_url:
             return True  # not applicable, consider success
+
+        if critical:
+            retries = max(retries, 4)  # 5 total attempts for critical signals
 
         room_name = f"room-{conversation_id}"
         msg_type = data.get("type", "unknown")

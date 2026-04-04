@@ -22,18 +22,15 @@ class RoutingEngine:
         db: AsyncSession,
         tenant_id: UUID,
         required_skills: list[str] | None = None,
-    ) -> UUID | None:
-        """Find the best available agent for a tenant.
+    ) -> tuple[UUID | None, int]:
+        """Find the best available agent using a multi-tier fallback chain.
 
-        Returns the ``AgentProfile.id`` of the least-loaded agent whose status
-        is *available* and who has capacity for another conversation, or
-        ``None`` if nobody qualifies.
-
-        When *required_skills* is provided the candidate pool is narrowed to
-        agents whose ``AgentProfile.skills`` JSONB column contains **any** of
-        the requested skills.
+        Returns ``(agent_id, match_tier)`` where:
+          - tier 1: agent has matching skills (or no skills were required)
+          - tier 2: any available agent (skill requirement relaxed)
+          - ``(None, 0)``: no agent available
         """
-        stmt = (
+        base_stmt = (
             select(AgentProfile.id)
             .join(AgentStatus, AgentStatus.agent_id == AgentProfile.id)
             .where(
@@ -41,31 +38,36 @@ class RoutingEngine:
                 AgentStatus.status == "available",
                 AgentStatus.current_conversations < AgentProfile.max_concurrent,
             )
+            .with_for_update(skip_locked=True)
+            .order_by(AgentStatus.current_conversations.asc())
+            .limit(1)
         )
 
+        # Tier 1: Exact skill match
         if required_skills:
-            # PostgreSQL JSONB containment: for each required skill check
-            # agent_profiles.skills @> '["skill"]'::jsonb, then OR them.
             from sqlalchemy import or_
 
             skill_filters = [
                 AgentProfile.skills.op("@>")(f'["{skill}"]')
                 for skill in required_skills
             ]
-            stmt = stmt.where(or_(*skill_filters))
+            tier1_stmt = base_stmt.where(or_(*skill_filters))
+            result = await db.execute(tier1_stmt)
+            agent_id = result.scalar_one_or_none()
+            if agent_id is not None:
+                logger.info("Tier 1 match: agent %s for tenant %s (skills=%s)", agent_id, tenant_id, required_skills)
+                return agent_id, 1
 
-        stmt = stmt.with_for_update(skip_locked=True)
-        stmt = stmt.order_by(AgentStatus.current_conversations.asc()).limit(1)
-
-        result = await db.execute(stmt)
+        # Tier 2: Any available agent (relaxed skills)
+        result = await db.execute(base_stmt)
         agent_id = result.scalar_one_or_none()
-
         if agent_id is not None:
-            logger.info("Found available agent %s for tenant %s", agent_id, tenant_id)
-        else:
-            logger.info("No available agent found for tenant %s (skills=%s)", tenant_id, required_skills)
+            tier = 2 if required_skills else 1  # If no skills were required, it's still tier 1
+            logger.info("Tier %d match: agent %s for tenant %s", tier, agent_id, tenant_id)
+            return agent_id, tier
 
-        return agent_id
+        logger.info("No available agent for tenant %s (skills=%s)", tenant_id, required_skills)
+        return None, 0
 
     async def assign_agent(
         self,
