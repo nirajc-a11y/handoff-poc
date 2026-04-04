@@ -119,6 +119,13 @@ class PlivoLiveKitBridge:
         # Overflow tracking for buffer overflow logging
         self._overflow_count = 0
 
+        # Signals when the LiveKit room disconnects (used by the Plivo WS loop to exit)
+        self._disconnected = asyncio.Event()
+
+    async def wait_until_disconnected(self) -> None:
+        """Await until the LiveKit room disconnects."""
+        await self._disconnected.wait()
+
     @property
     def room_name(self) -> str:
         return f"room-{self.conversation_id}"
@@ -187,6 +194,11 @@ class PlivoLiveKitBridge:
 
         # 3. Connect to room
         self._room = rtc.Room()
+
+        @self._room.on("disconnected")
+        def _on_room_disconnected(*_):
+            self._running = False
+            self._disconnected.set()
 
         # Subscribe to audio tracks from any non-bridge participant
         @self._room.on("track_subscribed")
@@ -568,6 +580,7 @@ class PlivoLiveKitBridge:
     async def stop(self) -> None:
         """Leave the LiveKit room and clean up."""
         self._running = False
+        self._disconnected.set()
         # Cancel all participant forwarding tasks
         for identity, task in self._subscribe_tasks.items():
             if not task.done():
