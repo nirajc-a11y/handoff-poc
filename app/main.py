@@ -7,8 +7,16 @@ import warnings
 # Suppress pydantic "model_" namespace warnings from livekit-agents internals
 warnings.filterwarnings("ignore", message=".*Field.*model_.*protected namespace.*")
 
-# Ensure application logs are visible in the terminal
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+# Structured log format with correlation ID
+from app.middleware.correlation import CorrelationIdFilter
+
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s [%(name)s] [%(correlation_id)s] %(message)s")
+)
+_log_handler.addFilter(CorrelationIdFilter())
+logging.root.addHandler(_log_handler)
+logging.root.setLevel(logging.INFO)
 
 
 from pathlib import Path
@@ -96,12 +104,22 @@ async def lifespan(app: FastAPI):
 
         _room_cleanup_task = asyncio.create_task(_periodic_room_cleanup())
 
+    # Start queue timeout monitor
+    from app.services.queue_monitor import run_queue_monitor
+    _queue_monitor_task = asyncio.create_task(run_queue_monitor())
+
     yield
     # Shutdown — try/finally ensures all cleanup runs even if one step fails
     if _room_cleanup_task and not _room_cleanup_task.done():
         _room_cleanup_task.cancel()
         try:
             await _room_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    if _queue_monitor_task and not _queue_monitor_task.done():
+        _queue_monitor_task.cancel()
+        try:
+            await _queue_monitor_task
         except asyncio.CancelledError:
             pass
     try:
@@ -130,12 +148,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from app.middleware.correlation import CorrelationIdMiddleware
+app.add_middleware(CorrelationIdMiddleware)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/recordings", StaticFiles(directory=_recordings_dir), name="recordings")
 
 from app.api.v1.router import v1_router  # noqa: E402
 
 app.include_router(v1_router, prefix="/api/v1")
+
+# Expose health endpoints at root (without /api/v1 prefix) for load balancers
+from app.api.v1.health import router as health_router  # noqa: E402
+app.include_router(health_router)
 
 # Serve frontend SPA build (Railway / production)
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend_dist"
