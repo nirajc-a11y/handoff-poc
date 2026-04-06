@@ -47,7 +47,7 @@ export function SupervisorPanel({ conversationId, isActive }: SupervisorPanelPro
     <div className="flex flex-col gap-4 p-4">
       {!isActive && (
         <div className="rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-center">
-          <p className="text-xs text-gray-500">Call has ended. Supervision controls are disabled.</p>
+          <p className="text-xs text-gray-500">Supervision is only available during AI handling or human handling.</p>
         </div>
       )}
 

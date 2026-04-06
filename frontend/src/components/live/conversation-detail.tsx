@@ -253,7 +253,7 @@ export function ConversationDetail() {
           {tab === 'email-thread' && <EmailThreadPanel conversationId={conversation.id} />}
           {tab === 'supervise' && (
             <ErrorBoundary fallback={<div className="p-4 text-sm text-red-500">Supervisor panel encountered an error</div>}>
-              <SupervisorPanel conversationId={conversation.id} isActive={conversation.state !== 'ended' && conversation.state !== 'failed'} />
+              <SupervisorPanel conversationId={conversation.id} isActive={conversation.state === 'ai_handling' || conversation.state === 'human_handling'} />
             </ErrorBoundary>
           )}
         </div>

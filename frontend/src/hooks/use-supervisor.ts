@@ -45,6 +45,8 @@ export function useSupervisorListen(convId: string | null) {
       })
 
       await room.connect(tokenRes.url, tokenRes.token)
+      // Enable audio playback — required by browsers due to autoplay policy
+      await room.startAudio()
       setState({ isListening: true, error: null })
     } catch {
       setState({ isListening: false, error: 'Failed to connect to call audio' })
