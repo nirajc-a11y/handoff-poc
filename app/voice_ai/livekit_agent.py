@@ -287,7 +287,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Start session
     session = AgentSession(
-        aec_warmup_duration=1.5,
+        aec_warmup_duration=0.3,
     )
 
     await session.start(
