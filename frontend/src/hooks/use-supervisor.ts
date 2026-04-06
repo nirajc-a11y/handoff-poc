@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import type { Room } from 'livekit-client'
+import type { Room, RemoteTrack } from 'livekit-client'
 import { api } from '@/lib/api'
 
 // ---------------------------------------------------------------------------
@@ -27,13 +27,33 @@ export function useSupervisorListen(convId: string | null) {
         { mode: 'listen' },
       )
 
-      const { Room, RoomEvent } = await import('livekit-client')
+      const { Room, RoomEvent, Track } = await import('livekit-client')
       const room = new Room()
       roomRef.current = room
+
+      // Attach an audio track to the DOM so the browser plays it.
+      // room.startAudio() alone is insufficient in Chrome — the AudioContext
+      // may remain suspended unless audio elements are explicitly attached.
+      const attachTrack = (track: RemoteTrack) => {
+        if (track.kind !== Track.Kind.Audio) return
+        const el = track.attach()
+        el.setAttribute('data-supervisor-audio', 'true')
+        document.body.appendChild(el)
+      }
+
+      room.on(RoomEvent.TrackSubscribed, (track) => {
+        attachTrack(track)
+      })
+
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach()
+      })
 
       room.on(RoomEvent.Disconnected, () => {
         setState({ isListening: false, error: null })
         roomRef.current = null
+        // Clean up any lingering audio elements
+        document.querySelectorAll('[data-supervisor-audio]').forEach(el => el.remove())
       })
 
       room.on(RoomEvent.Reconnecting, () => {
@@ -47,6 +67,14 @@ export function useSupervisorListen(convId: string | null) {
       await room.connect(tokenRes.url, tokenRes.token)
       // Enable audio playback — required by browsers due to autoplay policy
       await room.startAudio()
+
+      // Attach tracks from participants already in the room when we join
+      for (const participant of room.remoteParticipants.values()) {
+        for (const publication of participant.audioTrackPublications.values()) {
+          if (publication.track) attachTrack(publication.track)
+        }
+      }
+
       setState({ isListening: true, error: null })
     } catch {
       setState({ isListening: false, error: 'Failed to connect to call audio' })
@@ -59,6 +87,7 @@ export function useSupervisorListen(convId: string | null) {
       roomRef.current.disconnect()
       roomRef.current = null
     }
+    document.querySelectorAll('[data-supervisor-audio]').forEach(el => el.remove())
     setState({ isListening: false, error: null })
   }, [])
 

@@ -344,16 +344,17 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.warning("Session closed without scheduled hangup — forcing disconnect")
             asyncio.create_task(_end_call())
 
-    # Wait for the plivo-bridge participant to connect, then generate greeting
+    # Wait for the plivo-bridge participant to connect, then stay silent.
+    # The bridge plays the cached TTS greeting directly to the caller via
+    # stream_greeting() — no LLM round-trip needed. The agent's first response
+    # will be to the caller's first utterance.
     async def _greet():
         try:
             participant = await ctx.wait_for_participant(identity="plivo-bridge")
             logger.info("Plivo bridge connected: %s", participant.identity)
-            session.generate_reply(
-                instructions="Someone just picked up the phone. Say hi, give your name, and ask how you can help. Keep it to one short sentence."
-            )
+            # Greeting handled by bridge.stream_greeting() — agent waits for caller.
         except RuntimeError:
-            logger.warning("Session closed before greeting could be sent")
+            logger.warning("Session closed before bridge connected")
 
     asyncio.create_task(_greet())
 
