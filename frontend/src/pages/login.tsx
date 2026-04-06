@@ -24,12 +24,22 @@ export function LoginPage() {
     return <Navigate to="/live" replace />
   }
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
   const handleConnect = () => {
     const trimmedTenant = tenantInput.trim()
     const trimmedUser = userInput.trim()
 
     if (!trimmedTenant || !trimmedUser) {
       setError('Both Tenant ID and User ID are required.')
+      return
+    }
+    if (!UUID_RE.test(trimmedTenant)) {
+      setError('Tenant ID must be a valid UUID (e.g. from the seed output).')
+      return
+    }
+    if (!UUID_RE.test(trimmedUser)) {
+      setError('User ID must be a valid UUID (e.g. from the seed output).')
       return
     }
 
@@ -79,6 +89,7 @@ export function LoginPage() {
               onKeyDown={handleKeyDown}
               className="font-mono text-sm"
             />
+            <p className="text-xs text-gray-400">Use the agent UUID from the seed output, not a name.</p>
           </div>
 
           {error && (
