@@ -12,9 +12,6 @@ import uuid as _uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
-from app.config import settings
-from app.core.handoff_engine import handoff_engine
-from app.core.state_machine import Trigger
 from app.db.engine import async_session_factory
 from app.db.models.tenant import Tenant
 from app.voice_ai.plivo_livekit_bridge import PlivoLiveKitBridge
@@ -23,55 +20,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/plivo", tags=["plivo-stream"])
 
-
-async def _handle_stream_escalation(db, tenant_id: str, conv_id: str):
-    """Trigger AI->Human escalation.
-
-    The handoff engine sends a data channel message to the LiveKit room —
-    the bridge stays connected and the AI agent disconnects gracefully.
-    """
-    conv_uuid = _uuid.UUID(conv_id)
-
-    try:
-        await handoff_engine.process_trigger(
-            db=db,
-            conversation_id=conv_uuid,
-            trigger=Trigger.AI_TRANSFER,
-            metadata={"reason": "AI escalation via voice stream", "provider": "plivo"},
-        )
-        await db.commit()
-        logger.info("Escalation state transition complete: conv=%s", conv_id)
-    except Exception:
-        logger.exception("Failed to transition state for escalation: conv=%s", conv_id)
-        return
-
-    # LiveKit path: handoff engine already sent data channel message
-    # to the room — no Plivo redirect needed. Bridge stays connected.
-    logger.info("LiveKit escalation: bridge stays connected, AI agent will disconnect (conv=%s)", conv_id)
-
-
-async def _handle_stream_hangup(db, tenant_id: str, conv_id: str):
-    """End the call when the customer says goodbye."""
-    conv_uuid = _uuid.UUID(conv_id)
-
-    try:
-        for trigger in (Trigger.AGENT_END, Trigger.DISPOSITION_SUBMITTED):
-            try:
-                await handoff_engine.process_trigger(
-                    db=db,
-                    conversation_id=conv_uuid,
-                    trigger=trigger,
-                    metadata={"reason": "Customer said goodbye", "disposition": "resolved"},
-                )
-            except Exception as exc:
-                if "not allowed in state" in str(exc):
-                    logger.info("Skipping %s for conv=%s (already transitioned)", trigger.value, conv_id)
-                    break
-                raise
-        await db.commit()
-        logger.info("Call ended by AI (customer goodbye): conv=%s", conv_id)
-    except Exception:
-        logger.exception("Failed to end call via AI: conv=%s", conv_id)
 
 
 @router.websocket("/audio-stream")

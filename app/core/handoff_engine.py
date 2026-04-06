@@ -6,9 +6,8 @@ It validates the transition against the state machine, executes the appropriate
 side effects (routing, provider calls, context building), persists the change,
 and publishes events for downstream consumers.
 
-When ``settings.use_livekit_agent`` is True, handoff side-effects send LiveKit
-data channel messages instead of redirecting Plivo calls. The Plivo-LiveKit
-bridge stays connected throughout the entire call lifecycle.
+Handoff side-effects send LiveKit data channel messages to the room.
+The Plivo-LiveKit bridge stays connected throughout the entire call lifecycle.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.core.ai_engine import AIEngine, ai_engine
 from app.core.context_builder import ContextBuilder, context_builder
 from app.core.events import Event, EventBus, event_bus

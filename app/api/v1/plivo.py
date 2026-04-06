@@ -453,71 +453,29 @@ async def _handle_ai_handoff(
 
     lang = (action.target_config or {}).get("language", "en")
 
-    # Check voice AI mode from tenant config
+    # Fetch speaker preference from tenant config
     from app.db.models.tenant import Tenant
     tenant_result = await db.execute(
         select(Tenant.config).where(Tenant.id == uuid.UUID(tenant_id))
     )
     tenant_config = tenant_result.scalar_one_or_none() or {}
-    voice_mode = tenant_config.get("voice_ai_mode", "plivo")
-    # Accept both "livekit" (legacy) and "sarvam" (current) as the real-time mode
-    if voice_mode == "sarvam":
-        voice_mode = "sarvam"
     sarvam_speaker = tenant_config.get("sarvam_speaker", "ritu")
-    logger.info("AI handoff: voice_mode=%s, lang=%s, speaker=%s", voice_mode, lang, sarvam_speaker)
+    logger.info("AI handoff: lang=%s, speaker=%s", lang, sarvam_speaker)
 
-    if voice_mode == "sarvam" and not settings.sarvam_api_key:
-        logger.error(
-            "LiveKit/Sarvam mode selected for tenant %s but SARVAM_API_KEY is empty — falling back to Plivo mode",
-            tenant_id,
-        )
-        voice_mode = "plivo"
+    # LiveKit bridge path: open a bidirectional audio stream
+    stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
+    stream_url = (
+        f"{stream_ws_url}/api/v1/plivo/audio-stream"
+        f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"
+    )
+    escaped_url = _escape_xml(stream_url)
 
-    if voice_mode == "sarvam":
-        # Mode B: Real-time AI via Plivo <Stream> + Sarvam
-        # Sarvam generates the greeting via TTS over the WebSocket for consistent voice.
-        stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
-        stream_url = (
-            f"{stream_ws_url}/api/v1/plivo/audio-stream"
-            f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"
-        )
-        escaped_url = _escape_xml(stream_url)
+    filler_xml = ""
+    if settings.plivo_filler_audio_url:
+        filler_xml = f'\n    <Play>{_escape_xml(settings.plivo_filler_audio_url)}</Play>'
 
-        # Play filler audio FIRST so caller hears something instantly
-        # instead of 4.5s silence while pipeline spins up
-        filler_xml = ""
-        if settings.plivo_filler_audio_url:
-            filler_xml = f'\n    <Play>{_escape_xml(settings.plivo_filler_audio_url)}</Play>'
-
-        xml = f"""<Response>{filler_xml}
+    xml = f"""<Response>{filler_xml}
     <Stream bidirectional="true" contentType="audio/x-mulaw;rate=8000" keepCallAlive="true" streamTimeout="1800">{escaped_url}</Stream>
-</Response>"""
-        return xml_response(xml)
-
-    # Mode A (default): Record + transcribe + LLM + Plivo TTS
-    greeting_text = (
-        action.target_config.get("greeting", "")
-        if action.target_config
-        else ""
-    ) or "You are now connected to our AI assistant. How can I help you today?"
-
-    s_greet = _speak(greeting_text, language=lang)
-
-    # After greeting, record customer speech using Plivo <Record>
-    # When recording finishes, Plivo POSTs the recording URL to /ai-turn
-    ai_turn_url = _abs(
-        f"/api/v1/plivo/ai-turn?tenant_id={tenant_id}"
-        f"&amp;conv_id={conv_id}&amp;language={lang}&amp;turn=0"
-    )
-    escalate_url = _abs(
-        f"/api/v1/plivo/escalate-to-human?tenant_id={tenant_id}&amp;conv_id={conv_id}"
-    )
-
-    xml = f"""<Response>
-    {s_greet}
-    <Record action="{ai_turn_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
-    {_speak("I didn't hear anything. Let me connect you to an agent.", language=lang)}
-    <Redirect method="POST">{escalate_url}</Redirect>
 </Response>"""
     return xml_response(xml)
 
@@ -529,11 +487,10 @@ async def _handle_human_queue(
     conv_id: str,
     action: IVRAction,
 ) -> Response:
-    """Transition to human queue and return appropriate XML.
+    """Transition to human queue and return Stream XML.
 
-    LiveKit path: return Stream XML (same as AI path) — the bridge handles
-    audio routing and the human agent joins the LiveKit room.
-    Legacy path: return Conference XML with hold music.
+    Returns a bidirectional Stream so the human agent can join the same
+    LiveKit room as the caller. The bridge handles audio routing.
     """
     try:
         await handoff_engine.process_trigger(

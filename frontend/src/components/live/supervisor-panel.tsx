@@ -142,9 +142,9 @@ export function SupervisorPanel({ conversationId, isActive }: SupervisorPanelPro
           <div className="rounded-md bg-green-50 border border-green-200 p-2 mb-3">
             <p className="text-xs text-green-700 font-medium">Call taken over successfully.</p>
             <p className="text-xs text-green-600 mt-1">
-              Conference: <code className="bg-green-100 px-1 rounded">{barge.data?.conference_name}</code>
+              Room: <code className="bg-green-100 px-1 rounded">{barge.data?.room}</code>
             </p>
-            <p className="text-xs text-green-600">Connect your softphone to join the call.</p>
+            <p className="text-xs text-green-600">You are now connected — your mic is live.</p>
           </div>
         )}
         {barge.isError && (
