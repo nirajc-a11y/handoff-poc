@@ -445,9 +445,10 @@ async def _handle_livekit_bridge(
     handles STT -> LLM -> TTS. This function just shuttles audio
     between Plivo and LiveKit.
     """
-    # Fetch tenant name and custom AI prompt for room metadata
+    # Fetch tenant name, custom AI prompt, and groq model for room metadata
     company_name = "Demo Corp"
     ai_system_prompt: str | None = None
+    groq_model: str | None = None
     if tenant_id:
         try:
             async with async_session_factory() as db:
@@ -458,6 +459,7 @@ async def _handle_livekit_bridge(
                     company_name = tenant.name
                     if tenant.config:
                         ai_system_prompt = tenant.config.get("ai_system_prompt")
+                        groq_model = tenant.config.get("groq_model")
         except Exception:
             logger.warning("Failed to fetch tenant %s for LiveKit bridge", tenant_id)
 
@@ -467,6 +469,7 @@ async def _handle_livekit_bridge(
         language=language,
         company_name=company_name,
         ai_system_prompt=ai_system_prompt,
+        groq_model=groq_model,
         plivo_ws_send=ws.send_json,
     )
 

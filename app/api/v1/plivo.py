@@ -309,12 +309,13 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
             _default_lang = _tconfig.get("default_language", "en")
             _speaker = _tconfig.get("sarvam_speaker", "ritu")
             _ai_prompt = _tconfig.get("ai_system_prompt")
+            _groq_model = _tconfig.get("groq_model")
 
             async def _prewarm_pipeline():
                 from app.services.room_prewarmer import room_prewarmer
                 from app.services.greeting_cache import warm_greeting_cache
                 await asyncio.gather(
-                    room_prewarmer.prewarm(conv_id, tenant_id, _default_lang, _company, _ai_prompt),
+                    room_prewarmer.prewarm(conv_id, tenant_id, _default_lang, _company, _ai_prompt, _groq_model),
                     warm_greeting_cache(tenant_id, _default_lang, _company, _speaker),
                     return_exceptions=True,
                 )
