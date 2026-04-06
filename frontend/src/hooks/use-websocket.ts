@@ -102,6 +102,6 @@ export function useWebSocket() {
         qc.invalidateQueries({ queryKey: ['campaigns'] })
       }
     })
-    return () => { unsub(); wsManager.disconnect() }
+    return () => { unsub(); wsManager.disconnect(); setInitialized(false); setConnected(false) }
   }, [tenantId, isConnected, setConnected, setExhausted, setEvents, qc])
 }

@@ -12,17 +12,20 @@ export class WebSocketManager {
   private maxRetries = 15
   private onStatusChange: ((connected: boolean) => void) | null = null
   private onMaxRetriesReached: (() => void) | null = null
+  private intentionalDisconnect = false
 
   connect(tenantId: string, onStatus?: (connected: boolean) => void, onMaxRetries?: () => void) {
     this.onStatusChange = onStatus ?? null
     this.onMaxRetriesReached = onMaxRetries ?? null
     this.retryCount = 0
+    this.intentionalDisconnect = false
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     this.url = `${protocol}//${location.host}/api/v1/ws/dashboard?tenant_id=${tenantId}`
     this._connect()
   }
 
   private _connect() {
+    this.intentionalDisconnect = false
     this.ws?.close()
     this.ws = new WebSocket(this.url)
     this.ws.onopen = () => { this.reconnectDelay = 1000; this.retryCount = 0; this.onStatusChange?.(true) }
@@ -34,7 +37,11 @@ export class WebSocketManager {
         console.warn('[ws] Failed to parse message:', err, e.data)
       }
     }
-    this.ws.onclose = () => { this.onStatusChange?.(false); this._scheduleReconnect() }
+    this.ws.onclose = () => {
+      if (this.intentionalDisconnect) return
+      this.onStatusChange?.(false)
+      this._scheduleReconnect()
+    }
     this.ws.onerror = () => this.ws?.close()
   }
 
@@ -67,11 +74,11 @@ export class WebSocketManager {
   }
 
   disconnect() {
+    this.intentionalDisconnect = true
     if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout)
     this.reconnectTimeout = null
     this.ws?.close()
     this.ws = null
-    this.onStatusChange?.(false)
   }
 }
 
