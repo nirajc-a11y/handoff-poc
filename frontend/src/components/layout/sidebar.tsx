@@ -1,4 +1,5 @@
 import { useAtom } from 'jotai'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Phone,
   BarChart3,
@@ -38,23 +39,22 @@ const navItems = [
 ] as const
 
 interface SidebarProps {
-  currentPage: string
-  onNavigate: (page: string) => void
   collapsed: boolean
   onToggle: () => void
 }
 
 function SidebarNav({
-  currentPage,
-  onNavigate,
   collapsed,
   onItemClick,
 }: {
-  currentPage: string
-  onNavigate: (page: string) => void
   collapsed: boolean
   onItemClick?: () => void
 }) {
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  const currentPage = location.pathname.split('/')[1] || 'live'
+
   return (
     <nav className="flex flex-1 flex-col gap-1 px-2">
       <TooltipProvider>
@@ -66,7 +66,7 @@ function SidebarNav({
             <button
               key={item.key}
               onClick={() => {
-                onNavigate(item.key)
+                navigate(`/${item.key}`)
                 onItemClick?.()
               }}
               className={cn(
@@ -99,7 +99,7 @@ function SidebarNav({
   )
 }
 
-export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: SidebarProps) {
+export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useAtom(mobileSidebarOpenAtom)
 
   return (
@@ -117,11 +117,7 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: Sideba
           </Button>
         </div>
 
-        <SidebarNav
-          currentPage={currentPage}
-          onNavigate={onNavigate}
-          collapsed={collapsed}
-        />
+        <SidebarNav collapsed={collapsed} />
       </div>
 
       {/* Mobile sidebar (sheet/drawer) */}
@@ -130,8 +126,6 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggle }: Sideba
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <div className="flex h-full flex-col pt-12">
             <SidebarNav
-              currentPage={currentPage}
-              onNavigate={onNavigate}
               collapsed={false}
               onItemClick={() => setMobileSidebarOpen(false)}
             />
