@@ -6,7 +6,7 @@ import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom, wsInitializedAtom } fro
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
-import type { Message, QueueStats, Conversation } from '@/lib/types'
+import type { Message, QueueStats, Conversation, ConversationState } from '@/lib/types'
 import type { PaginatedConversations } from '@/hooks/use-conversations'
 
 export function useWebSocket() {
@@ -58,7 +58,7 @@ export function useWebSocket() {
         // transition immediately without waiting for the refetch round-trip.
         if (event.type === 'conversation.state_changed' && event.data?.conversation_id) {
           const convId = event.data.conversation_id as string
-          const toState = event.data.to_state as string | undefined
+          const toState = event.data.to_state as ConversationState | undefined
           if (toState) {
             qc.setQueryData<Conversation>(
               ['conversations', 'detail', convId],
