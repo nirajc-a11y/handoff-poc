@@ -1,5 +1,5 @@
 import { useAtom } from 'jotai'
-import { useNavigate, useLocation } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import {
   Phone,
   BarChart3,
@@ -28,14 +28,14 @@ import {
 import { mobileSidebarOpenAtom } from '@/stores/ui'
 
 const navItems = [
-  { key: 'live', label: 'Live', icon: Phone },
-  { key: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { key: 'campaigns', label: 'Campaigns', icon: Megaphone },
-  { key: 'leads', label: 'Leads', icon: Contact },
-  { key: 'agents', label: 'Agents', icon: Users },
-  { key: 'history', label: 'History', icon: History },
-  { key: 'ivr', label: 'IVR', icon: GitBranch },
-  { key: 'settings', label: 'Settings', icon: Settings },
+  { path: '/live', label: 'Live', icon: Phone },
+  { path: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { path: '/campaigns', label: 'Campaigns', icon: Megaphone },
+  { path: '/leads', label: 'Leads', icon: Contact },
+  { path: '/agents', label: 'Agents', icon: Users },
+  { path: '/history', label: 'History', icon: History },
+  { path: '/ivr', label: 'IVR', icon: GitBranch },
+  { path: '/settings', label: 'Settings', icon: Settings },
 ] as const
 
 interface SidebarProps {
@@ -50,49 +50,43 @@ function SidebarNav({
   collapsed: boolean
   onItemClick?: () => void
 }) {
-  const navigate = useNavigate()
-  const location = useLocation()
-
-  const currentPage = location.pathname.split('/')[1] || 'live'
-
   return (
     <nav className="flex flex-1 flex-col gap-1 px-2">
       <TooltipProvider>
         {navItems.map((item) => {
           const Icon = item.icon
-          const isActive = currentPage === item.key
 
-          const button = (
-            <button
-              key={item.key}
-              onClick={() => {
-                navigate(`/${item.key}`)
-                onItemClick?.()
-              }}
-              className={cn(
-                'flex w-full items-center gap-3 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors',
-                isActive
-                  ? 'bg-blue-50 text-blue-700'
-                  : 'text-gray-600 hover:bg-muted hover:text-gray-900'
-              )}
+          const link = (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              onClick={onItemClick}
+              className={({ isActive }) =>
+                cn(
+                  'flex w-full items-center gap-3 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-blue-50 text-blue-700'
+                    : 'text-gray-600 hover:bg-muted hover:text-gray-900'
+                )
+              }
             >
               <Icon className="size-4 shrink-0" />
               {!collapsed && <span>{item.label}</span>}
-            </button>
+            </NavLink>
           )
 
           if (collapsed) {
             return (
-              <Tooltip key={item.key}>
+              <Tooltip key={item.path}>
                 <TooltipTrigger render={<div />}>
-                  {button}
+                  {link}
                 </TooltipTrigger>
                 <TooltipContent side="right">{item.label}</TooltipContent>
               </Tooltip>
             )
           }
 
-          return button
+          return link
         })}
       </TooltipProvider>
     </nav>
