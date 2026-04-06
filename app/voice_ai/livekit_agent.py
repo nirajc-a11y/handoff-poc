@@ -225,8 +225,8 @@ async def entrypoint(ctx: JobContext) -> None:
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.5,
-                max_delay=1.5,
+                min_delay=0.2,
+                max_delay=0.8,
             ),
             interruption=InterruptionOptions(
                 enabled=True,
