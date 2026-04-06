@@ -297,7 +297,7 @@ async def plivo_answer(request: Request, db: AsyncSession = Depends(get_db)):
 
         # --- OPTIMIZATION: Pre-warm LiveKit room + greeting cache during IVR ---
         # These run in background while caller navigates DTMF menu (~20s)
-        if settings.use_livekit_agent and settings.livekit_url:
+        if settings.livekit_url:
             import asyncio as _aio
             from app.db.models.tenant import Tenant as _Tenant
             tenant_result = await db.execute(
@@ -550,27 +550,14 @@ async def _handle_human_queue(
     except StateMachineError as exc:
         logger.warning("Human queue state transition failed: %s", exc)
 
-    # LiveKit path: route through the audio stream bridge so the human agent
-    # can join the same LiveKit room. The bridge handles all audio routing.
-    if settings.use_livekit_agent and settings.livekit_url:
-        stream_url = _abs(
-            f"/api/v1/plivo/audio-stream?tenant_id={tenant_id}"
-            f"&conv_id={conv_id}&language=en&skip_greeting=true"
-        )
-        s = _speak("Please hold while we connect you to an agent.")
-        xml = f"""<Response>
-    {s}
-    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw" streamTimeout="1800" audioTrack="inbound">{stream_url}</Stream>
-</Response>"""
-        return xml_response(xml)
-
-    # Legacy path: put the customer into a Plivo conference room
-    cb_url = _abs(f"/api/v1/plivo/conference-events?tenant_id={tenant_id}&amp;conv_id={conv_id}")
-    wait_url = _abs("/api/v1/plivo/hold-music")
+    stream_url = _abs(
+        f"/api/v1/plivo/audio-stream?tenant_id={tenant_id}"
+        f"&conv_id={conv_id}&language=en&skip_greeting=true"
+    )
     s = _speak("Please hold while we connect you to an agent.")
     xml = f"""<Response>
     {s}
-    <Conference callbackUrl="{cb_url}" waitSound="{wait_url}" enterSound="" startConferenceOnEnter="false" endConferenceOnExit="false" stayAlone="true" maxMembers="10">room-{conv_id}</Conference>
+    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw" streamTimeout="1800" audioTrack="inbound">{stream_url}</Stream>
 </Response>"""
     return xml_response(xml)
 
@@ -612,261 +599,8 @@ async def _handle_submenu(
     return xml_response(xml)
 
 
-@router.post("/connect-agent")
-async def plivo_connect_agent(request: Request):
-    """Return XML that places the call into a conference room.
-
-    The ``conf_name`` query parameter specifies the room.  An agent joining
-    the same room creates a live bridge between customer and agent.
-    """
-    form = await request.form()
-    conf_name = request.query_params.get("conf_name", "")
-    target = request.query_params.get("target", "")
-
-    if target:
-        # Cold transfer: dial the target number directly
-        xml = f"""<Response>
-    <Dial>
-        <Number>{_escape_xml(target)}</Number>
-    </Dial>
-</Response>"""
-        return xml_response(xml)
-
-    if not conf_name:
-        call_uuid = form.get("CallUUID", "unknown")
-        conf_name = f"room-{call_uuid}"
-
-    cb_url = _abs("/api/v1/plivo/conference-events")
-    xml = f"""<Response>
-    <Conference callbackUrl="{cb_url}" enterSound="beep:1" startConferenceOnEnter="true" endConferenceOnExit="false" stayAlone="true" maxMembers="10">{_escape_xml(conf_name)}</Conference>
-</Response>"""
-    return xml_response(xml)
 
 
-@router.post("/hold-music")
-async def plivo_hold_music(request: Request):
-    """Return XML that plays hold music / comfort messages in a loop.
-
-    Plivo does not support ``<Play loop="0">`` with ``<Wait>`` in the same
-    ``<Response>``, so we use ``<Speak>`` and ``<Wait>`` to simulate a hold
-    experience, with a ``<Redirect>`` to loop back.
-    """
-    redirect_url = _abs("/api/v1/plivo/hold-music")
-    s1 = _speak("Please hold while we connect you to an agent.")
-    s2 = _speak("Thank you for your patience. An agent will be with you shortly.")
-    return xml_response(f"""<Response>
-    {s1}
-    <Wait length="30" />
-    {s2}
-    <Wait length="30" />
-    <Redirect method="POST">{redirect_url}</Redirect>
-</Response>""")
-
-
-@router.post("/ai-turn")
-async def plivo_ai_turn(request: Request, db: AsyncSession = Depends(get_db)):
-    """Handle one turn of AI conversation using Plivo Record + Groq Whisper + LLM.
-
-    Flow: Plivo records customer speech → POSTs RecordUrl here →
-    we download audio → Groq Whisper transcribes → Groq LLM responds →
-    return <Speak> response + <Record> for next turn.
-    """
-    from app.core.ai_engine import ai_engine
-    from app.db.models.message import Message
-    import os
-
-    form = await request.form()
-    tenant_id = request.query_params.get("tenant_id", "")
-    conv_id = request.query_params.get("conv_id", "")
-    language = request.query_params.get("language", "en")
-    turn = int(request.query_params.get("turn", "0"))
-
-    # Plivo Record callback sends RecordUrl with the audio
-    record_url = str(form.get("RecordUrl", "")).strip()
-    record_duration = str(form.get("RecordingDuration", "0")).strip()
-
-    escalate_url = _abs(
-        f"/api/v1/plivo/escalate-to-human?tenant_id={tenant_id}&amp;conv_id={conv_id}"
-    )
-
-    conv_uuid = uuid.UUID(conv_id) if conv_id else None
-    tenant_uuid = uuid.UUID(tenant_id) if tenant_id else None
-
-    # If no recording or too short, retry or escalate
-    if not record_url or float(record_duration or 0) < 0.5:
-        if turn >= 2:
-            return xml_response(f"""<Response>
-    {_speak("I could not hear you. Let me connect you to a human agent.", language=language)}
-    <Redirect method="POST">{escalate_url}</Redirect>
-</Response>""")
-
-        next_url = _abs(
-            f"/api/v1/plivo/ai-turn?tenant_id={tenant_id}"
-            f"&amp;conv_id={conv_id}&amp;language={language}&amp;turn={turn + 1}"
-        )
-        return xml_response(f"""<Response>
-    {_speak("I am listening. Please go ahead and speak after the beep.", language=language)}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
-    {_speak("I didn't hear anything. Let me connect you to an agent.", language=language)}
-    <Redirect method="POST">{escalate_url}</Redirect>
-</Response>""")
-
-    logger.info("AI turn %d: recording received (%ss) from %s", turn, record_duration, record_url)
-
-    # Step 1: Save recording to local file
-    recording_filename = None
-    try:
-        import httpx as httpx_client
-        async with httpx_client.AsyncClient(timeout=15.0) as http:
-            audio_resp = await http.get(record_url)
-            audio_resp.raise_for_status()
-            audio_data = audio_resp.content
-
-        recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "recordings")
-        os.makedirs(recordings_dir, exist_ok=True)
-        recording_filename = f"{conv_id}_{turn}_{int(datetime.now(timezone.utc).timestamp())}.mp3"
-        recording_path = os.path.join(recordings_dir, recording_filename)
-        with open(recording_path, "wb") as f:
-            f.write(audio_data)
-        logger.info("Saved recording: %s (%d bytes)", recording_filename, len(audio_data))
-
-        # Save recording as audio message
-        if conv_uuid and tenant_uuid:
-            audio_msg = Message(
-                tenant_id=tenant_uuid,
-                conversation_id=conv_uuid,
-                sender_type="customer",
-                content_type="audio",
-                content=f"/recordings/{recording_filename}",
-                metadata_={"recording_url": record_url, "duration": record_duration, "turn": turn},
-            )
-            db.add(audio_msg)
-            await db.flush()
-    except Exception:
-        logger.exception("Failed to save recording")
-
-    # Step 2: Transcribe with Groq Whisper (pass pre-downloaded audio to avoid second download)
-    speech_text = ""
-    try:
-        speech_text = await ai_engine.transcribe_audio(record_url, audio_data=audio_data)
-    except Exception:
-        logger.exception("Transcription failed")
-
-    if not speech_text:
-        # Whisper returned empty — retry or escalate
-        if turn >= 2:
-            return xml_response(f"""<Response>
-    {_speak("I could not understand. Let me connect you to a human agent.", language=language)}
-    <Redirect method="POST">{escalate_url}</Redirect>
-</Response>""")
-
-        next_url = _abs(
-            f"/api/v1/plivo/ai-turn?tenant_id={tenant_id}"
-            f"&amp;conv_id={conv_id}&amp;language={language}&amp;turn={turn + 1}"
-        )
-        return xml_response(f"""<Response>
-    {_speak("I could not understand that. Could you please repeat?", language=language)}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
-</Response>""")
-
-    logger.info("AI turn %d: customer said: %s", turn, speech_text)
-
-    # Step 3: Save customer text message + transcript
-    if conv_uuid and tenant_uuid:
-        try:
-            text_msg = Message(
-                tenant_id=tenant_uuid,
-                conversation_id=conv_uuid,
-                sender_type="customer",
-                content_type="text",
-                content=speech_text,
-                metadata_={"source": "whisper_transcription", "turn": turn},
-            )
-            db.add(text_msg)
-            await db.flush()
-        except Exception:
-            logger.exception("Failed to save customer text message")
-
-    # Step 4: Build conversation history
-    history = []
-    if conv_uuid:
-        try:
-            msg_stmt = (
-                select(Message)
-                .where(
-                    Message.conversation_id == conv_uuid,
-                    Message.content_type == "text",
-                )
-                .order_by(Message.created_at.asc())
-            )
-            msg_result = await db.execute(msg_stmt)
-            for m in msg_result.scalars():
-                if m.sender_type == "customer":
-                    history.append({"role": "user", "content": m.content or ""})
-                elif m.sender_type in ("ai", "agent"):
-                    history.append({"role": "assistant", "content": m.content or ""})
-        except Exception:
-            pass
-
-    # Step 5: Call LLM
-    try:
-        ai_response = await ai_engine.process_message(
-            customer_message=speech_text,
-            conversation_history=history,
-            language=language,
-        )
-
-        # Save AI response
-        if conv_uuid and tenant_uuid:
-            ai_msg = Message(
-                tenant_id=tenant_uuid,
-                conversation_id=conv_uuid,
-                sender_type="ai",
-                content_type="text",
-                content=ai_response.text,
-                metadata_={"confidence": ai_response.confidence, "should_escalate": ai_response.should_escalate, "turn": turn},
-            )
-            db.add(ai_msg)
-
-            conv_stmt = select(Conversation).where(Conversation.id == conv_uuid)
-            conv_result = await db.execute(conv_stmt)
-            conv = conv_result.scalar_one_or_none()
-            if conv:
-                conv.ai_confidence_score = ai_response.confidence
-                if ai_response.escalation_reason:
-                    conv.ai_escalation_reason = ai_response.escalation_reason
-
-        await db.commit()
-        logger.info("AI response (confidence=%.2f, escalate=%s): %s",
-                     ai_response.confidence, ai_response.should_escalate, ai_response.text[:100])
-
-    except Exception:
-        logger.exception("AI engine failed")
-        ai_response = type("R", (), {
-            "text": "I'm having trouble right now. Let me connect you to an agent.",
-            "should_escalate": True, "confidence": 0.0, "escalation_reason": "ai_error",
-        })()
-
-    # Step 6: Respond
-    if ai_response.should_escalate:
-        s = _speak(ai_response.text + " Let me connect you to a human agent.", language=language)
-        return xml_response(f"""<Response>
-    {s}
-    <Redirect method="POST">{escalate_url}</Redirect>
-</Response>""")
-
-    # Speak AI response + record next turn
-    next_url = _abs(
-        f"/api/v1/plivo/ai-turn?tenant_id={tenant_id}"
-        f"&amp;conv_id={conv_id}&amp;language={language}&amp;turn={turn + 1}"
-    )
-    s_response = _speak(ai_response.text, language=language)
-    return xml_response(f"""<Response>
-    {s_response}
-    <Record action="{next_url}" method="POST" maxLength="15" timeout="2" finishOnKey="#" redirect="true" />
-    {_speak("I didn't hear a response. Let me connect you to an agent.", language=language)}
-    <Redirect method="POST">{escalate_url}</Redirect>
-</Response>""")
 
 
 @router.post("/escalate-to-human")
@@ -882,79 +616,9 @@ async def plivo_escalate_to_human(request: Request, db: AsyncSession = Depends(g
     tenant_id = request.query_params.get("tenant_id", "")
     conv_id = request.query_params.get("conv_id", "")
 
-    # LiveKit path: bridge stays connected, no conference needed.
-    # This endpoint should not be called, but guard against it.
-    if settings.use_livekit_agent and settings.livekit_url:
-        logger.info("escalate-to-human called in LiveKit mode — returning empty XML (conv=%s)", conv_id)
-        return xml_response("<Response></Response>")
-
-    if conv_id:
-        try:
-            conv_uuid = uuid.UUID(conv_id)
-            await handoff_engine.process_trigger(
-                db=db,
-                conversation_id=conv_uuid,
-                trigger=Trigger.AI_TRANSFER,
-                metadata={"reason": "AI escalation via voice call", "provider": "plivo"},
-            )
-            await db.commit()
-        except (StateMachineError, Exception) as exc:
-            logger.warning("Escalation state transition failed: %s", exc)
-
-    # Legacy path: return hold music while waiting for human agent
-    cb_url = _abs(f"/api/v1/plivo/conference-events?tenant_id={tenant_id}&amp;conv_id={conv_id}")
-    wait_url = _abs("/api/v1/plivo/hold-music")
-    s = _speak("Please hold while we connect you to an agent.")
-    return xml_response(f"""<Response>
-    {s}
-    <Conference callbackUrl="{cb_url}" waitSound="{wait_url}" enterSound="" startConferenceOnEnter="false" endConferenceOnExit="false" stayAlone="true" maxMembers="10">room-{conv_id}</Conference>
-</Response>""")
-
-
-@router.post("/conference-events")
-async def plivo_conference_events(
-    request: Request, db: AsyncSession = Depends(get_db)
-):
-    """Handle Plivo conference callbacks (member joined, member left, etc.).
-
-    This can be used to detect when an agent joins or leaves the conference
-    and trigger the appropriate state transitions.
-    """
-    form = await request.form()
-    conference_name = str(form.get("ConferenceName", ""))
-    event = str(form.get("ConferenceAction", ""))
-    member_id = str(form.get("ConferenceMemberID", ""))
-    call_uuid = str(form.get("CallUUID", ""))
-    tenant_id = request.query_params.get("tenant_id", "")
-    conv_id = request.query_params.get("conv_id", "")
-
-    logger.info(
-        "Plivo conference event: conf=%s action=%s member=%s call=%s",
-        conference_name,
-        event,
-        member_id,
-        call_uuid,
-    )
-
-    # Publish events for downstream handling
-    if event == "enter" and conv_id:
-        # An agent has joined the conference -- this could trigger AGENT_ASSIGNED
-        logger.info(
-            "Conference member joined: conf=%s, conv_id=%s, call=%s",
-            conference_name,
-            conv_id,
-            call_uuid,
-        )
-
-    elif event == "exit" and conv_id:
-        logger.info(
-            "Conference member left: conf=%s, conv_id=%s, call=%s",
-            conference_name,
-            conv_id,
-            call_uuid,
-        )
-
+    logger.info("escalate-to-human called in LiveKit mode — returning empty XML (conv=%s)", conv_id)
     return xml_response("<Response></Response>")
+
 
 
 @router.post("/call-status")
