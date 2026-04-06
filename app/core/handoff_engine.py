@@ -531,28 +531,7 @@ class HandoffEngine:
         conversation.sub_state = "on_hold"
 
         if conversation.channel == "voice":
-            from app.config import settings
-            if settings.use_livekit_agent and settings.livekit_url:
-                # LiveKit path: signal the bridge to stop forwarding agent audio
-                await self._send_room_data(conversation.id, {"type": "hold"})
-            else:
-                # Legacy path: instruct the telephony provider to play hold music
-                try:
-                    provider = await self._provider_registry.get_telephony(
-                        conversation.tenant_id, db,
-                    )
-                    session_id = self._get_provider_session_id(conversation)
-                    if provider and session_id:
-                        hold_music_url = metadata.get("hold_music_url")
-                        await provider.hold_call(session_id, hold_music_url=hold_music_url)
-                except Exception:
-                    logger.exception(
-                        "Failed to place call on hold via provider "
-                        "(conversation=%s, state=%s, tenant=%s)",
-                        conversation.id,
-                        conversation.state,
-                        conversation.tenant_id,
-                    )
+            await self._send_room_data(conversation.id, {"type": "hold"})
 
     async def _handle_unhold(
         self,
@@ -564,27 +543,7 @@ class HandoffEngine:
         conversation.sub_state = None
 
         if conversation.channel == "voice":
-            from app.config import settings
-            if settings.use_livekit_agent and settings.livekit_url:
-                # LiveKit path: signal the bridge to resume forwarding
-                await self._send_room_data(conversation.id, {"type": "unhold"})
-            else:
-                # Legacy path
-                try:
-                    provider = await self._provider_registry.get_telephony(
-                        conversation.tenant_id, db,
-                    )
-                    session_id = self._get_provider_session_id(conversation)
-                    if provider and session_id:
-                        await provider.unhold_call(session_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to unhold call via provider "
-                        "(conversation=%s, state=%s, tenant=%s)",
-                        conversation.id,
-                        conversation.state,
-                        conversation.tenant_id,
-                    )
+            await self._send_room_data(conversation.id, {"type": "unhold"})
 
     async def _handle_wrap_up(
         self,
@@ -598,28 +557,6 @@ class HandoffEngine:
             "type": "call_ended",
             "reason": metadata.get("reason", "wrap_up"),
         })
-
-        # Hang up the actual phone call via the telephony provider.
-        # In LiveKit mode the bridge WebSocket closure (triggered by the
-        # call_ended data message above) is sufficient — no provider API call needed.
-        if conversation.channel == "voice":
-            from app.config import settings as _cfg
-            if not (_cfg.use_livekit_agent and _cfg.livekit_url):
-                try:
-                    provider = await self._provider_registry.get_telephony(
-                        conversation.tenant_id, db,
-                    )
-                    session_id = self._get_provider_session_id(conversation)
-                    if provider and session_id:
-                        await provider.end_call(session_id)
-                except (KeyError, Exception):
-                    logger.warning(
-                        "Failed to hang up call via provider "
-                        "(conversation=%s, state=%s, tenant=%s)",
-                        conversation.id,
-                        conversation.state,
-                        conversation.tenant_id,
-                    )
 
         # Release the agent so they can take new conversations while filling
         # out the disposition form.
@@ -712,10 +649,6 @@ class HandoffEngine:
         Retries up to `retries` times with backoff. Returns True on success.
         Critical signals (handoff, agent_assigned) should check the return value.
         """
-        from app.config import settings
-        if not settings.use_livekit_agent or not settings.livekit_url:
-            return True  # not applicable, consider success
-
         if critical:
             retries = max(retries, 4)  # 5 total attempts for critical signals
 
