@@ -231,7 +231,7 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.8,   # Short enough to catch 2-word questions ("Can you repeat?")
+                min_duration=0.3,   # Catches short phrases ("Wait", "Stop") while avoiding noise
                 min_words=2,        # 2+ words = real interruption (not single-word noise)
                 resume_false_interruption=True,  # Single-word noise ("Okay") resumes instead of restarting
             ),
