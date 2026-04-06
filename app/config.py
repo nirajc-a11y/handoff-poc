@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     vad_min_silence_duration: float = 0.3
     vad_activation_threshold: float = 0.45
     bargein_min_duration: float = 0.15
-    greeting_cache_timeout: float = 1.5
+    greeting_cache_timeout: float = 300.0
     plivo_send_max_retries: int = 3
     circuit_breaker_threshold: int = 3
     queue_timeout_seconds: int = 300
