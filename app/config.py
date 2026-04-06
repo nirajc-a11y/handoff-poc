@@ -50,11 +50,11 @@ class Settings(BaseSettings):
     # Voice pipeline tuning
     deepgram_stt_model: str = "nova-3"
     deepgram_tts_model: str = "aura-2-asteria-en"  # warmer voice, better clarity at 8kHz telephony
-    deepgram_endpointing_ms: int = 400  # 300 was too aggressive — premature cut-off on short replies
+    deepgram_endpointing_ms: int = 250  # 400 was too slow — ~150ms saved per turn; min_duration=0.35 guards short replies
     sarvam_tts_speaker: str = "ritu"
     llm_timeout_seconds: float = 8.0  # reduced from 12s — shorter silence window on LLM failures
     llm_max_tokens: int = 250
-    vad_min_silence_duration: float = 0.4  # 0.3 fired too quickly, causing unnatural pacing
+    vad_min_silence_duration: float = 0.3  # reduced from 0.4 — saves ~100ms per turn; interruption min_duration guards against premature cuts
     vad_activation_threshold: float = 0.45
     bargein_min_duration: float = 0.15
     greeting_cache_timeout: float = 300.0

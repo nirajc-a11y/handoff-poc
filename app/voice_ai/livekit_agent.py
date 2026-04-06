@@ -98,11 +98,11 @@ _VOICE_CALL_RULES = (
     "- Keep responses SHORT — 1–2 sentences max per turn, then stop and wait for them to speak.\n"
     "- NEVER narrate your actions, say 'one moment', or describe what you're doing.\n"
     "- If the caller interrupts you, STOP immediately and listen. Do NOT restart your previous message.\n"
-    "- If the caller says a single word like 'Okay', 'Yes', 'No', 'Sure' — treat it as acknowledgment and wait briefly before continuing, don't launch into a long response.\n"
+    "- If the caller says a short acknowledgment like 'Okay', 'Yes', 'No', 'Sure', 'Alright', 'Got it' — treat it as a filler. Do NOT call any tools. Do NOT end the call. Do NOT transfer. Just continue your previous thought in one short sentence.\n"
     "- NEVER respond as if you were asked 'how are you' unless the caller explicitly asked that. Do not say 'I'm doing well' unprompted.\n"
     "- Stay on the CURRENT topic. If the caller introduces a new topic, switch to it immediately.\n"
     "- If the caller says goodbye, hangs up, or the conversation is complete, call end_call immediately.\n"
-    "- If you cannot resolve the issue within 3 exchanges, or the caller asks for a human, call transfer_to_human.\n"
+    "- Only call transfer_to_human if the caller explicitly says 'human', 'agent', 'speak to someone', 'connect me', or you have had at least 3 substantive exchanges and cannot resolve the issue. Never transfer based on a short filler word.\n"
     "- Never make up information. Never break character."
 )
 
@@ -209,6 +209,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # --- Function tools (replace keyword-based detection) ---
     room_name = ctx.room.name
     hangup_scheduled = False
+    _disconnecting = False
 
     @function_tool(
         name="end_call",
@@ -245,9 +246,9 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.2,   # Catch short utterances quickly
-                min_words=1,        # Any word = real interruption — stops the agent immediately
-                resume_false_interruption=False,
+                min_duration=0.35,  # was 0.2 — filter out short noise bursts and single-word fillers
+                min_words=2,        # was 1 — single words ("Okay", "No") don't interrupt TTS
+                resume_false_interruption=True,  # was False — re-check quickly instead of 2s dead air
             ),
         ),
         allow_interruptions=True,
@@ -339,7 +340,7 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("close")
     def _on_session_close(*_):
         logger.info("Session closed: room=%s", ctx.room.name)
-        if not hangup_scheduled:
+        if not hangup_scheduled and not _disconnecting:
             logger.warning("Session closed without scheduled hangup — forcing disconnect")
             asyncio.create_task(_end_call())
 
@@ -357,6 +358,8 @@ async def entrypoint(ctx: JobContext) -> None:
     asyncio.create_task(_greet())
 
     async def _graceful_disconnect(reason: str) -> None:
+        nonlocal _disconnecting
+        _disconnecting = True
         logger.info("Graceful disconnect: reason=%s, room=%s", reason, ctx.room.name)
         try:
             await session.aclose()
