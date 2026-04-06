@@ -120,7 +120,8 @@ async def _handle_livekit_bridge(
                 logger.info("LiveKit bridge stream started: sid=%s, room=%s", stream_sid, bridge.room_name)
                 # Play cached greeting immediately — bypasses LLM/TTS pipeline latency.
                 # The LiveKit agent (livekit_agent.py) will wait for the caller to speak first.
-                asyncio.create_task(bridge.stream_greeting())
+                # Store the reference to prevent premature GC in Python 3.12+.
+                _greeting_task = asyncio.create_task(bridge.stream_greeting())
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")

@@ -46,7 +46,8 @@ export function useSupervisorListen(convId: string | null) {
       })
 
       room.on(RoomEvent.TrackUnsubscribed, (track) => {
-        track.detach()
+        const elements = track.detach()
+        elements.forEach(el => el.remove())
       })
 
       room.on(RoomEvent.Disconnected, () => {
@@ -95,6 +96,9 @@ export function useSupervisorListen(convId: string | null) {
     return () => {
       roomRef.current?.disconnect()
       roomRef.current = null
+      // Remove audio elements in case component unmounts while session is active.
+      // The Disconnected event may not fire synchronously after disconnect().
+      document.querySelectorAll('[data-supervisor-audio]').forEach(el => el.remove())
     }
   }, [convId])
 
