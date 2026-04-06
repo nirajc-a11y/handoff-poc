@@ -1,22 +1,43 @@
 import { useState, useEffect } from 'react'
-import { useAtom, useAtomValue } from 'jotai'
-import { Phone, Menu } from 'lucide-react'
-import { isConnectedAtom } from '@/stores/auth'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
+import { useNavigate } from 'react-router-dom'
+import { Phone, Menu, LogOut } from 'lucide-react'
+import { tenantIdAtom, userIdAtom, isConnectedAtom } from '@/stores/auth'
 import { mobileSidebarOpenAtom } from '@/stores/ui'
+import { wsConnectedAtom, wsInitializedAtom } from '@/stores/ws'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { TenantSelector } from './tenant-selector'
 import { SoftphoneIndicator } from './softphone-indicator'
 
 export function Header() {
-  const isConnected = useAtomValue(isConnectedAtom)
+  const tenantId = useAtomValue(tenantIdAtom)
+  const setUserId = useSetAtom(userIdAtom)
+  const [isConnected, setIsConnected] = useAtom(isConnectedAtom)
+  const setTenantId = useSetAtom(tenantIdAtom)
+  const setWsConnected = useSetAtom(wsConnectedAtom)
+  const setWsInitialized = useSetAtom(wsInitializedAtom)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useAtom(mobileSidebarOpenAtom)
+  const navigate = useNavigate()
   const [clock, setClock] = useState(new Date())
 
   useEffect(() => {
     const timer = setInterval(() => setClock(new Date()), 1000)
     return () => clearInterval(timer)
   }, [])
+
+  const handleDisconnect = () => {
+    setIsConnected(false)
+    setTenantId('')
+    setUserId('')
+    setWsConnected(false)
+    setWsInitialized(false)
+    navigate('/login', { replace: true })
+  }
+
+  // Truncate tenant ID for display: show first 8 and last 4 chars
+  const displayTenant = tenantId
+    ? `${tenantId.slice(0, 8)}…${tenantId.slice(-4)}`
+    : ''
 
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-white px-4">
@@ -42,7 +63,11 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-2 sm:gap-4">
-        <TenantSelector />
+        {tenantId && (
+          <span className="hidden sm:inline font-mono text-xs text-gray-500" title={tenantId}>
+            {displayTenant}
+          </span>
+        )}
 
         <SoftphoneIndicator />
 
@@ -66,6 +91,16 @@ export function Header() {
             hour12: false,
           })}
         </span>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={handleDisconnect}
+          title="Disconnect"
+        >
+          <LogOut className="size-4" />
+          <span className="sr-only">Disconnect</span>
+        </Button>
       </div>
     </header>
   )
