@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { useQueryClient } from '@tanstack/react-query'
 import { wsManager } from '@/lib/ws'
-import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom } from '@/stores/ws'
+import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom, wsInitializedAtom } from '@/stores/ws'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
@@ -15,6 +15,7 @@ export function useWebSocket() {
   const [, setConnected] = useAtom(wsConnectedAtom)
   const [, setEvents] = useAtom(wsEventsAtom)
   const [, setExhausted] = useAtom(wsExhaustedAtom)
+  const setInitialized = useSetAtom(wsInitializedAtom)
   const setSelectedConvId = useSetAtom(selectedConvIdAtom)
   const qc = useQueryClient()
 
@@ -26,6 +27,7 @@ export function useWebSocket() {
 
   useEffect(() => {
     if (!tenantId || !isConnected) return
+    setInitialized(true)
     wsManager.connect(
       tenantId,
       (connected) => {
