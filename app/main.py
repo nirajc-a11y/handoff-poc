@@ -81,35 +81,30 @@ async def lifespan(app: FastAPI):
     _get_model_path()
     logger.info("Silero VAD model pre-loaded")
 
-    # Log LiveKit agent status
-    if settings.use_livekit_agent and settings.livekit_url:
-        logger.info(
-            "LiveKit agent mode enabled — run the agent worker separately with: "
-            "python -m app.voice_ai.livekit_agent"
-        )
+    # LiveKit agent — run worker separately
+    logger.info(
+        "LiveKit agent mode enabled — run the agent worker separately with: "
+        "python -m app.voice_ai.livekit_agent"
+    )
 
     # Start periodic cleanup of stale pre-warmed LiveKit rooms
-    _room_cleanup_task = None
-    if settings.use_livekit_agent and settings.livekit_url:
-        async def _periodic_room_cleanup():
-            from app.services.room_prewarmer import room_prewarmer
-            while True:
-                try:
-                    await asyncio.sleep(30)
-                    await room_prewarmer.cleanup_stale(max_age_seconds=60)
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    logger.warning("Room cleanup error", exc_info=True)
+    async def _periodic_room_cleanup():
+        from app.services.room_prewarmer import room_prewarmer
+        while True:
+            try:
+                await asyncio.sleep(30)
+                await room_prewarmer.cleanup_stale(max_age_seconds=60)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Room cleanup error", exc_info=True)
 
-        _room_cleanup_task = asyncio.create_task(_periodic_room_cleanup())
+    _room_cleanup_task = asyncio.create_task(_periodic_room_cleanup())
 
     # Start transcript persistence handler (LiveKit agent publishes to Redis;
     # this subscriber saves Message records and emits conversation.message_added)
-    _transcript_task = None
-    if settings.use_livekit_agent and settings.livekit_url:
-        from app.services.transcript_handler import run_transcript_handler
-        _transcript_task = asyncio.create_task(run_transcript_handler())
+    from app.services.transcript_handler import run_transcript_handler
+    _transcript_task = asyncio.create_task(run_transcript_handler())
 
     # Start queue timeout monitor
     from app.services.queue_monitor import run_queue_monitor

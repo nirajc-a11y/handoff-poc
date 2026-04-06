@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     livekit_url: str = ""
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
-    use_livekit_agent: bool = False
+    use_livekit_agent: bool = True
 
     # Sarvam AI (Indian language STT/TTS)
     sarvam_api_key: str = ""
