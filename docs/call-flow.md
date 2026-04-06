@@ -215,7 +215,7 @@ Per-sentence TTS (immediately, no wait for full response)
 TTS audio published as agent's audio track in the room
 ```
 
-**Latency budget:** ~1.5–2.0s turn latency end-to-end (VAD end → first audio played back).
+**Latency budget:** ~0.8–1.2s turn latency end-to-end (VAD end → first audio played back). First turn ~0.3–0.5s faster due to reduced AEC warmup (0.3s vs 1.5s).
 
 **Transcript persistence** — the agent worker has no DB connection. Transcripts flow via Redis:
 

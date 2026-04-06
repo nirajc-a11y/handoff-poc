@@ -91,11 +91,16 @@ _SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
-_TOOL_RULES = (
-    "\n\nTOOL USAGE RULES (mandatory):\n"
-    "- This is a live phone call. You are speaking with a real person.\n"
-    "- NEVER use bullet points, lists, markdown, or formatting — this is spoken audio.\n"
-    "- Keep responses to 1 short sentence per turn, then wait.\n"
+_VOICE_CALL_RULES = (
+    "\n\nVOICE CALL RULES (mandatory — you are on a live phone call):\n"
+    "- This is a LIVE PHONE CALL. You are speaking with a real person in real time.\n"
+    "- NEVER use bullet points, lists, markdown, asterisks, or any formatting — this is spoken audio.\n"
+    "- Keep responses SHORT — 1–2 sentences max per turn, then stop and wait for them to speak.\n"
+    "- NEVER narrate your actions, say 'one moment', or describe what you're doing.\n"
+    "- If the caller interrupts you, STOP immediately and listen. Do NOT restart your previous message.\n"
+    "- If the caller says a single word like 'Okay', 'Yes', 'No', 'Sure' — treat it as acknowledgment and wait briefly before continuing, don't launch into a long response.\n"
+    "- NEVER respond as if you were asked 'how are you' unless the caller explicitly asked that. Do not say 'I'm doing well' unprompted.\n"
+    "- Stay on the CURRENT topic. If the caller introduces a new topic, switch to it immediately.\n"
     "- If the caller says goodbye, hangs up, or the conversation is complete, call end_call immediately.\n"
     "- If you cannot resolve the issue within 3 exchanges, or the caller asks for a human, call transfer_to_human.\n"
     "- Never make up information. Never break character."
@@ -107,9 +112,15 @@ def _build_system_prompt(
     company_name: str,
     custom_prompt: str | None = None,
 ) -> str:
-    """Build the full system prompt, always appending tool usage rules."""
+    """Build the full system prompt.
+
+    Custom prompts provide persona/knowledge (who you are, what you know).
+    We always wrap them with voice call rules (how to behave on a phone call).
+    This prevents the LLM from hallucinating greeting responses to non-greeting
+    inputs when using a bare tenant-supplied prompt.
+    """
     if custom_prompt:
-        return custom_prompt + _TOOL_RULES
+        return custom_prompt + _VOICE_CALL_RULES
     template = _SYSTEM_PROMPTS.get(language, _SYSTEM_PROMPTS["en"])
     return template.format(company_name=company_name)
 
@@ -154,11 +165,14 @@ async def entrypoint(ctx: JobContext) -> None:
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
 
     # LLM — Groq via OpenAI-compatible endpoint (llama-4-scout: fast + good tool calling)
+    # groq_model can be overridden per-tenant via room metadata
+    groq_model = metadata.get("groq_model") or _settings.groq_model
     llm_plugin = openai.LLM(
-        model=_settings.groq_model,
+        model=groq_model,
         base_url="https://api.groq.com/openai/v1",
         api_key=_settings.groq_api_key,
         temperature=0.2,
+        timeout=_settings.llm_timeout_seconds,
     )
 
     # TTS selection based on language
@@ -225,15 +239,15 @@ async def entrypoint(ctx: JobContext) -> None:
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.5,
-                max_delay=1.5,
+                min_delay=0.4,   # 0.2 felt rushed — more natural conversational rhythm
+                max_delay=1.0,   # allow VAD to settle before forcing a response
             ),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.8,   # Short enough to catch 2-word questions ("Can you repeat?")
-                min_words=2,        # 2+ words = real interruption (not single-word noise)
-                resume_false_interruption=True,  # Single-word noise ("Okay") resumes instead of restarting
+                min_duration=0.2,   # Catch short utterances quickly
+                min_words=1,        # Any word = real interruption — stops the agent immediately
+                resume_false_interruption=False,
             ),
         ),
         allow_interruptions=True,
@@ -249,17 +263,25 @@ async def entrypoint(ctx: JobContext) -> None:
         if not conversation_id or not tenant_id or not content.strip():
             return
         try:
-            from app.core.redis import get_redis
-            r = get_redis()
-            await r.publish(
-                "transcript.added",
-                json.dumps({
-                    "conversation_id": conversation_id,
-                    "tenant_id": tenant_id,
-                    "sender_type": sender_type,
-                    "content": content.strip(),
-                }),
-            )
+            import redis.asyncio as aioredis
+            # Create a fresh connection per publish — the agent runs in a
+            # subprocess with its own event loop, so the shared singleton pool
+            # from the main process cannot be reused (different loop error).
+            async with aioredis.from_url(
+                _settings.redis_url,
+                decode_responses=True,
+                socket_timeout=5.0,
+                socket_connect_timeout=5.0,
+            ) as r:
+                await r.publish(
+                    "transcript.added",
+                    json.dumps({
+                        "conversation_id": conversation_id,
+                        "tenant_id": tenant_id,
+                        "sender_type": sender_type,
+                        "content": content.strip(),
+                    }),
+                )
         except Exception:
             logger.warning("Failed to publish transcript to Redis", exc_info=True)
 
@@ -287,7 +309,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Start session
     session = AgentSession(
-        aec_warmup_duration=1.5,
+        aec_warmup_duration=0.3,
     )
 
     await session.start(

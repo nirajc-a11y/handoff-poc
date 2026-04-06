@@ -90,6 +90,7 @@ class PlivoLiveKitBridge:
         language: str = "en",
         company_name: str = "Demo Corp",
         ai_system_prompt: str | None = None,
+        groq_model: str | None = None,
         plivo_ws_send: ...,  # async callable to send JSON to Plivo WS
         stream_sid: str = "",
     ) -> None:
@@ -98,6 +99,7 @@ class PlivoLiveKitBridge:
         self.language = language
         self.company_name = company_name
         self.ai_system_prompt = ai_system_prompt
+        self.groq_model = groq_model
         self._plivo_send = plivo_ws_send
         self._stream_sid = stream_sid
 
@@ -159,6 +161,8 @@ class PlivoLiveKitBridge:
                 }
                 if self.ai_system_prompt:
                     room_metadata["ai_system_prompt"] = self.ai_system_prompt
+                if self.groq_model:
+                    room_metadata["groq_model"] = self.groq_model
                 await room_api.room.create_room(
                     lk_api.CreateRoomRequest(
                         name=self.room_name,
@@ -217,8 +221,11 @@ class PlivoLiveKitBridge:
             if identity in self._subscribe_tasks:
                 self._subscribe_tasks[identity].cancel()
             logger.info("Subscribed to audio track from %s in room %s", identity, self.room_name)
+            # Receive at native 24kHz — we downsample to 8kHz ourselves inside
+            # _forward_participant_audio using audioop.ratecv with state, which
+            # avoids frame-boundary discontinuities from LiveKit's internal resampler.
             audio_stream = rtc.AudioStream(
-                track, sample_rate=_PLIVO_SAMPLE_RATE, num_channels=1
+                track, sample_rate=_LK_SAMPLE_RATE, num_channels=1
             )
             self._subscribe_tasks[identity] = asyncio.create_task(
                 self._forward_participant_audio(audio_stream, identity)
@@ -423,8 +430,9 @@ class PlivoLiveKitBridge:
         Plivo's bidirectional stream only delivers caller audio TO us;
         we must send participant audio BACK via playAudio events.
 
-        Audio arrives as PCM 16-bit 8kHz (resampled by LiveKit's AudioStream).
-        We convert to mulaw and send in 160-byte chunks (20ms at 8kHz).
+        Audio arrives as PCM 16-bit 24kHz. We downsample to 8kHz using
+        audioop.ratecv with persistent state across frames to avoid
+        frame-boundary discontinuities, then encode to mulaw for Plivo.
         """
         chunks_sent = 0
         frames_received = 0
@@ -432,6 +440,7 @@ class PlivoLiveKitBridge:
         local_mulaw_buf = bytearray()
         _consecutive_send_failures = 0
         _MAX_SEND_FAILURES = 3  # kill bridge after 3 consecutive failures
+        _ratecv_state = None  # persistent resampler state across frames
 
         logger.info(
             "Audio forwarding started for %s: conv=%s, stream_sid=%s",
@@ -466,12 +475,16 @@ class PlivoLiveKitBridge:
                     empty_frames += 1
                     continue
 
-                # Convert PCM 16-bit 8kHz -> mulaw 8kHz
+                # Downsample PCM 16-bit 24kHz -> 8kHz with stateful resampler,
+                # then encode to mulaw for Plivo.
                 try:
-                    mulaw_data = audioop.lin2ulaw(pcm_data, 2)
+                    pcm_8k, _ratecv_state = audioop.ratecv(
+                        pcm_data, 2, 1, _LK_SAMPLE_RATE, _PLIVO_SAMPLE_RATE, _ratecv_state
+                    )
+                    mulaw_data = audioop.lin2ulaw(pcm_8k, 2)
                 except audioop.error as e:
                     if frames_received <= 5:
-                        logger.warning("[%s] lin2ulaw failed on frame #%d: %s", identity, frames_received, e)
+                        logger.warning("[%s] audio conversion failed on frame #%d: %s", identity, frames_received, e)
                     continue
 
                 local_mulaw_buf.extend(mulaw_data)

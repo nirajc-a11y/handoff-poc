@@ -2,11 +2,11 @@ import { useEffect } from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { useQueryClient } from '@tanstack/react-query'
 import { wsManager } from '@/lib/ws'
-import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom } from '@/stores/ws'
+import { wsConnectedAtom, wsEventsAtom, wsExhaustedAtom, wsInitializedAtom } from '@/stores/ws'
 import { tenantIdAtom, isConnectedAtom } from '@/stores/auth'
 import { selectedConvIdAtom } from '@/stores/ui'
 import type { WSEvent } from '@/lib/types'
-import type { Message, QueueStats, Conversation } from '@/lib/types'
+import type { Message, QueueStats, Conversation, ConversationState } from '@/lib/types'
 import type { PaginatedConversations } from '@/hooks/use-conversations'
 
 export function useWebSocket() {
@@ -15,6 +15,7 @@ export function useWebSocket() {
   const [, setConnected] = useAtom(wsConnectedAtom)
   const [, setEvents] = useAtom(wsEventsAtom)
   const [, setExhausted] = useAtom(wsExhaustedAtom)
+  const setInitialized = useSetAtom(wsInitializedAtom)
   const setSelectedConvId = useSetAtom(selectedConvIdAtom)
   const qc = useQueryClient()
 
@@ -26,6 +27,7 @@ export function useWebSocket() {
 
   useEffect(() => {
     if (!tenantId || !isConnected) return
+    setInitialized(true)
     wsManager.connect(
       tenantId,
       (connected) => {
@@ -56,7 +58,7 @@ export function useWebSocket() {
         // transition immediately without waiting for the refetch round-trip.
         if (event.type === 'conversation.state_changed' && event.data?.conversation_id) {
           const convId = event.data.conversation_id as string
-          const toState = event.data.to_state as string | undefined
+          const toState = event.data.to_state as ConversationState | undefined
           if (toState) {
             qc.setQueryData<Conversation>(
               ['conversations', 'detail', convId],
@@ -100,6 +102,6 @@ export function useWebSocket() {
         qc.invalidateQueries({ queryKey: ['campaigns'] })
       }
     })
-    return () => { unsub(); wsManager.disconnect() }
+    return () => { unsub(); wsManager.disconnect(); setInitialized(false); setConnected(false) }
   }, [tenantId, isConnected, setConnected, setExhausted, setEvents, qc])
 }

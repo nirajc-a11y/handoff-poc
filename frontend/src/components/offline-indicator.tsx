@@ -1,12 +1,13 @@
 import { useAtomValue } from 'jotai'
-import { wsConnectedAtom, wsExhaustedAtom } from '@/stores/ws'
+import { wsConnectedAtom, wsExhaustedAtom, wsInitializedAtom } from '@/stores/ws'
 import { wsManager } from '@/lib/ws'
 
 export function OfflineIndicator() {
   const connected = useAtomValue(wsConnectedAtom)
   const exhausted = useAtomValue(wsExhaustedAtom)
+  const initialized = useAtomValue(wsInitializedAtom)
 
-  if (connected) return null
+  if (!initialized || connected) return null
 
   return (
     <div className="bg-amber-500 text-white px-4 py-2 text-center text-sm font-medium flex items-center justify-center gap-2">

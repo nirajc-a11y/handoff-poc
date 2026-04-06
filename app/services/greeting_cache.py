@@ -23,7 +23,7 @@ GREETING_TEMPLATES = {
     "mr": "{company_name} विक्री विभागात आपले स्वागत आहे. मी तुमचा AI सहाय्यक आहे. मी तुम्हाला कशी मदत करू शकतो?",
 }
 
-_CACHE_TTL = 86400  # 24 hours
+_CACHE_TTL = int(settings.greeting_cache_timeout)
 
 
 def _cache_key(tenant_id: str, language: str, company_name: str) -> str:
@@ -69,7 +69,7 @@ async def cache_greeting(
     company_name: str,
     audio_bytes: bytes,
 ) -> None:
-    """Store synthesized greeting in Redis. TTL = 24h."""
+    """Store synthesized greeting in Redis. TTL from settings.greeting_cache_timeout."""
     key = _cache_key(tenant_id, language, company_name)
     try:
         raw_redis = aioredis.from_url(
