@@ -33,17 +33,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/plivo", tags=["plivo"])
 
-# Base URL for absolute webhook URLs (Plivo requires absolute URLs)
-_BASE = settings.base_webhook_url.rstrip("/")
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _abs(path: str) -> str:
     """Make a path absolute using the configured webhook base URL."""
-    return f"{_BASE}{path}"
+    return f"{settings.base_webhook_url.rstrip('/')}{path}"
 
 
 # Plivo language codes for <Speak> — improves pronunciation for Indian languages.
@@ -463,7 +459,7 @@ async def _handle_ai_handoff(
     logger.info("AI handoff: lang=%s, speaker=%s", lang, sarvam_speaker)
 
     # LiveKit bridge path: open a bidirectional audio stream
-    stream_ws_url = _BASE.replace("https://", "wss://").replace("http://", "ws://")
+    stream_ws_url = settings.base_webhook_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
     stream_url = (
         f"{stream_ws_url}/api/v1/plivo/audio-stream"
         f"?tenant_id={tenant_id}&conv_id={conv_id}&language={lang}&speaker={sarvam_speaker}"

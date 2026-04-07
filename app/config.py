@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     sarvam_tts_speaker: str = "ritu"
     llm_timeout_seconds: float = 8.0  # reduced from 12s — shorter silence window on LLM failures
     llm_max_tokens: int = 250
-    vad_min_silence_duration: float = 0.3  # reduced from 0.4 — saves ~100ms per turn; interruption min_duration guards against premature cuts
+    vad_min_silence_duration: float = 0.2  # reduced from 0.3 — saves ~100ms per turn; interruption min_duration guards against premature cuts
     vad_activation_threshold: float = 0.45
     bargein_min_duration: float = 0.15
     greeting_cache_timeout: float = 300.0

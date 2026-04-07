@@ -139,13 +139,21 @@ async def entrypoint(ctx: JobContext) -> None:
     """Main agent entrypoint — called once per LiveKit room."""
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
-    # Extract configuration from room metadata
+    # Extract configuration from room metadata.
+    # The agent may join before LiveKit syncs the metadata set at room creation
+    # (race condition with pre-warmed rooms). Retry for up to 2s if empty.
     metadata = {}
-    if ctx.room.metadata:
-        try:
-            metadata = json.loads(ctx.room.metadata)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse room metadata: %s", ctx.room.metadata)
+    for _attempt in range(10):
+        if ctx.room.metadata:
+            try:
+                metadata = json.loads(ctx.room.metadata)
+                break  # parsed successfully
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse room metadata: %s", ctx.room.metadata)
+                break  # malformed — no point retrying
+        await asyncio.sleep(0.2)
+    else:
+        logger.warning("Room metadata still empty after retries: %s", ctx.room.name)
 
     language = metadata.get("language", "en")
     company_name = metadata.get("company_name", "Demo Corp")
@@ -240,7 +248,7 @@ async def entrypoint(ctx: JobContext) -> None:
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.4,   # 0.2 felt rushed — more natural conversational rhythm
+                min_delay=0.2,   # reduced from 0.4 — saves ~200ms per turn
                 max_delay=1.0,   # allow VAD to settle before forcing a response
             ),
             interruption=InterruptionOptions(
