@@ -107,6 +107,8 @@ When `USE_LIVEKIT_AGENT=true`, the voice pipeline switches from the custom Voice
 
 The feature flag is in `app/config.py` (`use_livekit_agent`). When disabled, the legacy VoiceAISession path is used unchanged.
 
+Latency budget (LiveKit mode): ~1.5–2.0s turn latency (VAD end → first audio played back). The `transfer_to_human` tool triggers escalation via an **in-process** `handoff_engine.process_trigger(trigger=Trigger.AI_TRANSFER)` call — there is no HTTP endpoint for this.
+
 ### Transcript Persistence (Redis pub/sub)
 
 LiveKit agent worker has no DB connection. Transcripts flow via Redis:

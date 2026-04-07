@@ -215,7 +215,7 @@ Per-sentence TTS (immediately, no wait for full response)
 TTS audio published as agent's audio track in the room
 ```
 
-**Latency budget:** ~0.8–1.2s turn latency end-to-end (VAD end → first audio played back). First turn ~0.3–0.5s faster due to reduced AEC warmup (0.3s vs 1.5s).
+**Latency budget:** ~1.5–2.0s turn latency end-to-end (VAD end → first audio played back). First turn ~0.3–0.5s faster due to reduced AEC warmup (0.3s vs 1.5s).
 
 **Transcript persistence** — the agent worker has no DB connection. Transcripts flow via Redis:
 
@@ -242,9 +242,9 @@ transcript_handler.py (FastAPI main process, subscribed to "transcript.added")
 When the agent's TTS audio track is published, the bridge subscribes automatically:
 
 ```
-Agent's TTS audio track (PCM 16-bit @ 8kHz)
+Agent's TTS audio track (PCM 16-bit @ 24kHz)
   ↓ bridge._on_track_subscribed() fires
-  ↓ rtc.AudioStream(track, sample_rate=8000, num_channels=1)
+  ↓ rtc.AudioStream(track, sample_rate=24000, num_channels=1)  ← receives at native 24kHz
   ↓ async for frame in audio_stream:
       audioop.lin2ulaw(frame.data, 2)
       → mulaw @ 8kHz
@@ -297,7 +297,8 @@ Caller says "I want to speak to a person" → agent's `transfer_to_human` functi
 ```
 Agent tool: transfer_to_human()
   ↓
-HTTP POST /api/v1/calls/{conv_id}/trigger  { "trigger": "CUSTOMER_ESCALATION" }
+_trigger_escalation() — in-process call (no HTTP):
+  handoff_engine.process_trigger(trigger=Trigger.AI_TRANSFER, ...)
   ↓
 HandoffEngine: AI_HANDLING → QUEUED_FOR_HUMAN
   – DB: conversation.queue_entered_at = now
