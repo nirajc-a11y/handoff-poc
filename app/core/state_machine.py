@@ -69,10 +69,13 @@ TRANSITIONS: Dict[
     # -- Call setup --
     (ConversationState.INITIATED, Trigger.DIAL): (ConversationState.RINGING, "state_change"),
     (ConversationState.INITIATED, Trigger.RING): (ConversationState.RINGING, "state_change"),
+    (ConversationState.INITIATED, Trigger.CUSTOMER_DISCONNECT): (ConversationState.ENDED, "state_change"),
+    (ConversationState.INITIATED, Trigger.ERROR): (ConversationState.FAILED, "state_change"),
     (ConversationState.RINGING, Trigger.ANSWER): (ConversationState.IVR, "state_change"),
     (ConversationState.RINGING, Trigger.NO_ANSWER): (ConversationState.FAILED, "state_change"),
     (ConversationState.RINGING, Trigger.BUSY): (ConversationState.FAILED, "state_change"),
     (ConversationState.RINGING, Trigger.ERROR): (ConversationState.FAILED, "state_change"),
+    (ConversationState.RINGING, Trigger.CUSTOMER_DISCONNECT): (ConversationState.ENDED, "state_change"),
     # -- IVR routing --
     (ConversationState.IVR, Trigger.DTMF_AI): (ConversationState.AI_HANDLING, "ivr_to_ai"),
     (ConversationState.IVR, Trigger.DTMF_HUMAN): (ConversationState.QUEUED_FOR_HUMAN, "ivr_to_human"),
