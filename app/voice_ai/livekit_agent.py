@@ -60,7 +60,9 @@ _SYSTEM_PROMPTS: dict[str, str] = {
         "- Ask only one question at a time.\n\n"
         "What to do:\n"
         "- If the caller asks for a human or you can't help after 2 tries, call transfer_to_human.\n"
-        "- If they say goodbye or want to hang up, call end_call.\n"
+        "- If they explicitly say goodbye or ask to hang up, call end_call.\n"
+        "- If the caller says 'Hello?', 'Still there?', 'Are you there?' or similar check-ins, "
+        "respond immediately — do NOT end the call.\n"
         "- Never make up facts. If unsure, say you'll connect them to someone who can help.\n"
         "- Never identify yourself as an AI."
     ),
@@ -199,7 +201,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @function_tool(
         name="end_call",
-        description="End the phone call. Use when the conversation is complete, the caller says goodbye or asks to hang up, or the call cannot proceed.",
+        description=(
+            "End the phone call. ONLY use when the caller explicitly says goodbye, "
+            "thanks and hangs up, or clearly states they want to end the call. "
+            "Do NOT use for silence, short check-ins ('Hello?', 'Still there?', 'Are you there?'), "
+            "or when the caller seems confused or waiting — respond and keep the call going instead."
+        ),
     )
     async def tool_end_call(ctx: RunContext, reason: str = "") -> str:
         logger.info("TOOL end_call: reason=%s, room=%s", reason, room_name)
