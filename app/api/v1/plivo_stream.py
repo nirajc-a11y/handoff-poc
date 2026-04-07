@@ -83,7 +83,13 @@ async def _handle_livekit_bridge(
     )
 
     try:
-        await bridge.start()
+        # Start LiveKit bridge connection in parallel with reading the first
+        # Plivo message. Plivo sends a "start" event immediately after WS
+        # accept (containing the stream_sid we need to send audio back).
+        # Previously bridge.start() (~420ms LiveKit connect) blocked before we
+        # ever read that message, adding ~370ms of silence before greeting.
+        bridge_start_task = asyncio.create_task(bridge.start())
+        _greeting_task: asyncio.Task | None = None
 
         while True:
             # Race: next Plivo message vs. LiveKit room disconnect
@@ -116,6 +122,8 @@ async def _handle_livekit_bridge(
             if event_type == "start":
                 start_data = msg.get("start", {})
                 stream_sid = start_data.get("streamId", "") or start_data.get("streamSid", "")
+                # Ensure bridge is fully connected before we try to use it
+                await bridge_start_task
                 bridge.update_stream_sid(stream_sid)
                 logger.info("LiveKit bridge stream started: sid=%s, room=%s", stream_sid, bridge.room_name)
                 # Play cached greeting immediately — bypasses LLM/TTS pipeline latency.
@@ -125,7 +133,7 @@ async def _handle_livekit_bridge(
 
             elif event_type == "media":
                 payload = msg.get("media", {}).get("payload", "")
-                if payload:
+                if payload and bridge_start_task.done():
                     audio_bytes = base64.b64decode(payload)
                     await bridge.feed_audio(audio_bytes)
 
@@ -138,6 +146,9 @@ async def _handle_livekit_bridge(
     except Exception:
         logger.exception("Error in LiveKit bridge: conv=%s", conv_id)
     finally:
+        # Cancel bridge_start_task if it never completed (e.g. early WS disconnect)
+        if not bridge_start_task.done():
+            bridge_start_task.cancel()
         # Ensure bridge and WebSocket are fully cleaned up
         try:
             await bridge.stop()

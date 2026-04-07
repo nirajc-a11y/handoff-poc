@@ -690,6 +690,10 @@ async def plivo_call_status(
         await db.commit()
         return {"status": "ok", "call_state": call_state.value, "trigger": None}
 
+    # Capture conversation_id as a plain value before any rollback can expire
+    # ORM attributes (db.rollback() in the retry loop expunges loaded state).
+    conv_id = session.conversation_id
+
     # Retry logic: Plivo can fire recording-status and call-status webhooks
     # nearly simultaneously, causing row-level lock contention (NOWAIT).
     max_retries = 3
@@ -698,7 +702,7 @@ async def plivo_call_status(
         try:
             conversation = await handoff_engine.process_trigger(
                 db=db,
-                conversation_id=session.conversation_id,
+                conversation_id=conv_id,
                 trigger=trigger,
                 metadata={
                     "provider": "plivo",
@@ -713,10 +717,10 @@ async def plivo_call_status(
             # Plivo's hangup webhook arrived) — not an error.
             logger.info(
                 "Ignoring %s for conv %s (already in terminal state)",
-                trigger.value, session.conversation_id,
+                trigger.value, conv_id,
             )
             await db.commit()
-            return {"status": "already_ended", "conversation_id": str(session.conversation_id)}
+            return {"status": "already_ended", "conversation_id": str(conv_id)}
         except (ConversationLockedError, OperationalError) as lock_exc:
             # Row locked by another concurrent webhook — retry after short delay
             if attempt < max_retries - 1:
@@ -724,7 +728,7 @@ async def plivo_call_status(
                 await asyncio.sleep(0.3 * (attempt + 1))
                 logger.info("Retrying call-status trigger (attempt %d, lock contention)", attempt + 2)
             else:
-                logger.warning("Lock contention persisted after %d retries for conv %s", max_retries, session.conversation_id)
+                logger.warning("Lock contention persisted after %d retries for conv %s", max_retries, conv_id)
                 await db.commit()
                 return {"status": "retry_exhausted", "reason": "lock_contention"}
 

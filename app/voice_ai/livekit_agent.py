@@ -318,7 +318,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Start session
     session = AgentSession(
-        aec_warmup_duration=0.3,
+        aec_warmup_duration=0.1,  # reduced from 0.3 — saves 200ms; telephony echo is handled at network level
     )
 
     await session.start(
